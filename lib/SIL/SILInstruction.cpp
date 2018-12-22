@@ -17,6 +17,7 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/Basic/type_traits.h"
 #include "swift/Basic/Unicode.h"
+#include "swift/SIL/ApplySite.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/SILDebugScope.h"
@@ -85,8 +86,10 @@ transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
   if (ThisParent == L2.getContainingBlock()) return;
 
   // Update the parent fields in the instructions.
-  for (; first != last; ++first)
+  for (; first != last; ++first) {
+    SWIFT_FUNC_STAT_NAMED("sil");
     first->ParentBB = ThisParent;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -154,7 +157,7 @@ void SILInstruction::dropAllReferences() {
 
   // If we have a function ref inst, we need to especially drop its function
   // argument so that it gets a proper ref decrement.
-  if (auto *FRI = dyn_cast<FunctionRefInst>(this)) {
+  if (auto *FRI = dyn_cast<FunctionRefBaseInst>(this)) {
     if (!FRI->getReferencedFunction())
       return;
     FRI->dropReferencedFunction();
@@ -450,6 +453,15 @@ namespace {
       auto *X = cast<FunctionRefInst>(LHS);
       return X->getReferencedFunction() == RHS->getReferencedFunction();
     }
+    bool visitDynamicFunctionRefInst(const DynamicFunctionRefInst *RHS) {
+      auto *X = cast<DynamicFunctionRefInst>(LHS);
+      return X->getReferencedFunction() == RHS->getReferencedFunction();
+    }
+    bool visitPreviousDynamicFunctionRefInst(
+        const PreviousDynamicFunctionRefInst *RHS) {
+      auto *X = cast<PreviousDynamicFunctionRefInst>(LHS);
+      return X->getReferencedFunction() == RHS->getReferencedFunction();
+    }
 
     bool visitAllocGlobalInst(const AllocGlobalInst *RHS) {
       auto *X = cast<AllocGlobalInst>(LHS);
@@ -480,12 +492,6 @@ namespace {
       auto LHS_ = cast<StringLiteralInst>(LHS);
       return LHS_->getEncoding() == RHS->getEncoding()
         && LHS_->getValue().equals(RHS->getValue());
-    }
-
-    bool visitConstStringLiteralInst(const ConstStringLiteralInst *RHS) {
-      auto LHS_ = cast<ConstStringLiteralInst>(LHS);
-      return LHS_->getEncoding() == RHS->getEncoding() &&
-             LHS_->getValue().equals(RHS->getValue());
     }
 
     bool visitStructInst(const StructInst *RHS) {
@@ -1069,7 +1075,6 @@ bool SILInstruction::mayReleaseOrReadRefCount() const {
   switch (getKind()) {
   case SILInstructionKind::IsUniqueInst:
   case SILInstructionKind::IsEscapingClosureInst:
-  case SILInstructionKind::IsUniqueOrPinnedInst:
     return true;
   default:
     return mayRelease();
@@ -1097,7 +1102,7 @@ namespace {
       Result = Cloned;
       SILCloner<TrivialCloner>::postProcess(Orig, Cloned);
     }
-    SILValue remapValue(SILValue Value) {
+    SILValue getMappedValue(SILValue Value) {
       return Value;
     }
     SILBasicBlock *remapBasicBlock(SILBasicBlock *BB) { return BB; }
@@ -1173,6 +1178,18 @@ bool SILInstruction::isTriviallyDuplicatable() const {
   // instructions must directly operate on the BeginAccess.
   if (isa<BeginAccessInst>(this))
     return false;
+
+  // begin_apply creates a token that has to be directly used by the
+  // corresponding end_apply and abort_apply.
+  if (isa<BeginApplyInst>(this))
+    return false;
+
+  // dynamic_method_br is not duplicatable because IRGen does not support phi
+  // nodes of objc_method type.
+  if (isa<DynamicMethodBranchInst>(this))
+    return false;
+
+  // If you add more cases here, you should also update SILLoop:canDuplicate.
 
   return true;
 }

@@ -187,6 +187,7 @@ namespace {
     }
 
     IMPL(BuiltinInteger, Trivial)
+    IMPL(BuiltinIntegerLiteral, Trivial)
     IMPL(BuiltinFloat, Trivial)
     IMPL(BuiltinRawPointer, Trivial)
     IMPL(BuiltinNativeObject, Reference)
@@ -560,7 +561,7 @@ namespace {
 
     void emitStore(SILBuilder &B, SILLocation loc, SILValue value,
                    SILValue addr, StoreOwnershipQualifier qual) const override {
-      if (B.getFunction().hasQualifiedOwnership()) {
+      if (B.getFunction().hasOwnership()) {
         B.createStore(loc, value, addr, StoreOwnershipQualifier::Trivial);
         return;
       }
@@ -569,7 +570,7 @@ namespace {
 
     SILValue emitLoad(SILBuilder &B, SILLocation loc, SILValue addr,
                       LoadOwnershipQualifier qual) const override {
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createLoad(loc, addr, LoadOwnershipQualifier::Trivial);
       return B.createLoad(loc, addr, LoadOwnershipQualifier::Unqualified);
     }
@@ -637,7 +638,7 @@ namespace {
 
     void emitStore(SILBuilder &B, SILLocation loc, SILValue value,
                    SILValue addr, StoreOwnershipQualifier qual) const override {
-      if (B.getFunction().hasQualifiedOwnership()) {
+      if (B.getFunction().hasOwnership()) {
         B.createStore(loc, value, addr, qual);
         return;
       }
@@ -661,7 +662,7 @@ namespace {
 
     SILValue emitLoad(SILBuilder &B, SILLocation loc, SILValue addr,
                       LoadOwnershipQualifier qual) const override {
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createLoad(loc, addr, qual);
 
       SILValue loadValue =
@@ -759,7 +760,7 @@ namespace {
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createCopyValue(loc, value);
       B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
@@ -792,7 +793,7 @@ namespace {
 
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue aggValue) const override {
-      if (B.getFunction().hasQualifiedOwnership()) {
+      if (B.getFunction().hasOwnership()) {
         B.createDestroyValue(loc, aggValue);
         return;
       }
@@ -897,7 +898,7 @@ namespace {
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createCopyValue(loc, value);
       B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
@@ -906,7 +907,7 @@ namespace {
     SILValue emitLoweredCopyValue(SILBuilder &B, SILLocation loc,
                                   SILValue value,
                                   TypeExpansionKind style) const override {
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createCopyValue(loc, value);
       B.createRetainValue(loc, value, B.getDefaultAtomicity());
       return value;
@@ -914,7 +915,7 @@ namespace {
 
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue value) const override {
-      if (B.getFunction().hasQualifiedOwnership()) {
+      if (B.getFunction().hasOwnership()) {
         B.createDestroyValue(loc, value);
         return;
       }
@@ -956,10 +957,11 @@ namespace {
 
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc,
                            SILValue value) const override {
-      if (isa<FunctionRefInst>(value))
+      if (isa<FunctionRefInst>(value) || isa<DynamicFunctionRefInst>(value) ||
+          isa<PreviousDynamicFunctionRefInst>(value))
         return value;
 
-      if (B.getFunction().hasQualifiedOwnership())
+      if (B.getFunction().hasOwnership())
         return B.createCopyValue(loc, value);
 
       B.createStrongRetain(loc, value, B.getDefaultAtomicity());
@@ -968,7 +970,7 @@ namespace {
 
     void emitDestroyValue(SILBuilder &B, SILLocation loc,
                           SILValue value) const override {
-      if (B.getFunction().hasQualifiedOwnership()) {
+      if (B.getFunction().hasOwnership()) {
         B.createDestroyValue(loc, value);
         return;
       }
@@ -985,14 +987,14 @@ namespace {
                                  IsReferenceCounted) {} \
     SILValue emitCopyValue(SILBuilder &B, SILLocation loc, \
                            SILValue value) const override { \
-      if (B.getFunction().hasQualifiedOwnership()) \
+      if (B.getFunction().hasOwnership()) \
         return B.createCopyValue(loc, value); \
       B.create##Name##Retain(loc, value, B.getDefaultAtomicity()); \
       return value; \
     } \
     void emitDestroyValue(SILBuilder &B, SILLocation loc, \
                           SILValue value) const override { \
-      if (B.getFunction().hasQualifiedOwnership()) { \
+      if (B.getFunction().hasOwnership()) { \
         B.createDestroyValue(loc, value); \
         return; \
       } \
@@ -1335,10 +1337,6 @@ void TypeConverter::insert(TypeKey k, const TypeLowering *tl) {
 static CanTupleType getLoweredTupleType(TypeConverter &tc,
                                         AbstractionPattern origType,
                                         CanTupleType substType) {
-  // We can't lower InOutType, and we can't lower an unlabeled one
-  // element vararg tuple either, because lowering strips off flags,
-  // which would end up producing a ParenType.
-  assert(!shouldExpandTupleType(substType));
   assert(origType.matchesTuple(substType));
 
   // Does the lowered tuple type differ from the substituted type in
@@ -1356,6 +1354,7 @@ static CanTupleType getLoweredTupleType(TypeConverter &tc,
     // Make sure we don't have something non-materializable.
     auto Flags = substElt.getParameterFlags();
     assert(Flags.getValueOwnership() == ValueOwnership::Default);
+    assert(!Flags.isVariadic());
 
     SILType silType = tc.getLoweredType(origEltType, substEltType);
     CanType loweredSubstEltType = silType.getASTType();
@@ -1363,8 +1362,8 @@ static CanTupleType getLoweredTupleType(TypeConverter &tc,
     changed = (changed || substEltType != loweredSubstEltType ||
                !Flags.isNone());
 
-    // Note: we drop any parameter flags such as @escaping, @autoclosure and
-    // varargs.
+    // Note: we drop @escaping and @autoclosure which can still appear on
+    // materializable tuple types.
     //
     // FIXME: Replace this with an assertion that the original tuple element
     // did not have any flags.
@@ -1372,7 +1371,7 @@ static CanTupleType getLoweredTupleType(TypeConverter &tc,
                              substElt.getName(),
                              ParameterTypeFlags());
   }
-  
+
   if (!changed) return substType;
 
   // The cast should succeed, because if we end up with a one-element
@@ -1473,9 +1472,16 @@ CanType TypeConverter::getLoweredRValueType(AbstractionPattern origType,
     auto extInfo = substFnType->getExtInfo();
     if (getSILFunctionLanguage(extInfo.getSILRepresentation())
           == SILFunctionLanguage::C) {
+      // The importer only applies fully-reversible bridging to the
+      // component types of C function pointers.
+      auto bridging = Bridgeability::Full;
+      if (extInfo.getSILRepresentation()
+                        == SILFunctionTypeRepresentation::CFunctionPointer)
+        bridging = Bridgeability::None;
+
       // Bridge the parameters and result of the function type.
       auto bridgedFnType = getBridgedFunctionType(origType, substFnType,
-                                                  extInfo);
+                                                  extInfo, bridging);
       substFnType = bridgedFnType;
 
       // Also rewrite the type of the abstraction pattern.
@@ -1621,7 +1627,7 @@ static CanAnyFunctionType getDefaultArgGeneratorInterfaceType(
                                                      ValueDecl *VD,
                                                      DeclContext *DC,
                                                      unsigned DefaultArgIndex) {
-  auto resultTy = getDefaultArgumentInfo(VD, DefaultArgIndex).second;
+  auto resultTy = getParameterAt(VD, DefaultArgIndex)->getInterfaceType();
   assert(resultTy && "Didn't find default argument?");
 
   // The result type might be written in terms of type parameters
@@ -1962,53 +1968,6 @@ TypeConverter::getProtocolDispatchStrategy(ProtocolDecl *P) {
   return ProtocolDispatchStrategy::Swift;
 }
 
-CanSILFunctionType TypeConverter::getMaterializeForSetCallbackType(
-    AbstractStorageDecl *storage, CanGenericSignature genericSig, Type selfType,
-    SILFunctionTypeRepresentation rep,
-    Optional<ProtocolConformanceRef> witnessMethodConformance) {
-  auto &ctx = M.getASTContext();
-
-  // Get lowered formal types for callback parameters.
-  auto selfMetatypeType = MetatypeType::get(selfType,
-                                            MetatypeRepresentation::Thick);
-
-  auto canSelfType = selfType->getCanonicalType(genericSig);
-  auto canSelfMetatypeType = selfMetatypeType->getCanonicalType(genericSig);
-  auto selfConvention = (storage->isSetterMutating()
-                         ? ParameterConvention::Indirect_Inout
-                         : ParameterConvention::Indirect_In_Guaranteed);
-
-  {
-    GenericContextScope scope(*this, genericSig);
-
-    // If 'self' is a metatype, make it @thin or @thick as needed, but not inside
-    // selfMetatypeType.
-    if (auto metatype = canSelfType->getAs<MetatypeType>()) {
-      if (!metatype->hasRepresentation())
-        canSelfType = getLoweredType(metatype).getASTType();
-    }
-  }
-
-  // Create the SILFunctionType for the callback.
-  SILParameterInfo params[] = {
-    { ctx.TheRawPointerType, ParameterConvention::Direct_Unowned },
-    { ctx.TheUnsafeValueBufferType, ParameterConvention::Indirect_Inout },
-    { canSelfType, selfConvention },
-    { canSelfMetatypeType, ParameterConvention::Direct_Unowned },
-  };
-  ArrayRef<SILResultInfo> results = {};
-
-  auto extInfo = SILFunctionType::ExtInfo().withRepresentation(rep);
-
-  if (genericSig && genericSig->areAllParamsConcrete())
-    genericSig = nullptr;
-
-  return SILFunctionType::get(genericSig, extInfo, SILCoroutineKind::None,
-                              /*callee*/ ParameterConvention::Direct_Unowned,
-                              params, {}, results, None, ctx,
-                              witnessMethodConformance);
-}
-
 /// If a capture references a local function, return a reference to that
 /// function.
 static Optional<AnyFunctionRef>
@@ -2124,8 +2083,6 @@ TypeConverter::getLoweredLocalCaptures(AnyFunctionRef fn) {
           case ReadWriteImplKind::Modify:
             collectFunctionCaptures(capturedVar->getModifyCoroutine());
             break;
-          case ReadWriteImplKind::MaterializeForSet:
-            llvm_unreachable("local variable with materializeForSet?");
           }
         }
 

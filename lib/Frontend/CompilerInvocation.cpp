@@ -59,7 +59,11 @@ void CompilerInvocation::setRuntimeResourcePath(StringRef Path) {
 }
 
 void CompilerInvocation::setTargetTriple(StringRef Triple) {
-  LangOpts.setTarget(llvm::Triple(Triple));
+  setTargetTriple(llvm::Triple(Triple));
+}
+
+void CompilerInvocation::setTargetTriple(const llvm::Triple &Triple) {
+  LangOpts.setTarget(Triple);
   updateRuntimeLibraryPath(SearchPathOpts, LangOpts.Target);
 }
 
@@ -96,21 +100,13 @@ static void diagnoseSwiftVersion(Optional<version::Version> &vers, Arg *verArg,
   diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
                  verArg->getAsString(Args), verArg->getValue());
 
-  // Check for an unneeded minor version, otherwise just list valid versions
-  if (vers.hasValue() && !vers.getValue().empty() &&
-      vers.getValue().asMajorVersion().getEffectiveLanguageVersion()) {
-    diags.diagnose(SourceLoc(), diag::note_swift_version_major,
-                   vers.getValue()[0]);
-  } else {
-    // Note valid versions instead
-    auto validVers = version::Version::getValidEffectiveVersions();
-    auto versStr =
-        "'" + llvm::join(validVers.begin(), validVers.end(), "', '") + "'";
-    diags.diagnose(SourceLoc(), diag::note_valid_swift_versions, versStr);
-  }
+  // Note valid versions.
+  auto validVers = version::Version::getValidEffectiveVersions();
+  auto versStr = "'" + llvm::join(validVers, "', '") + "'";
+  diags.diagnose(SourceLoc(), diag::note_valid_swift_versions, versStr);
 }
 
-/// \brief Create a new Regex instance out of the string value in \p RpassArg.
+/// Create a new Regex instance out of the string value in \p RpassArg.
 /// It returns a pointer to the newly generated Regex instance.
 static std::shared_ptr<llvm::Regex>
 generateOptimizationRemarkRegex(DiagnosticEngine &Diags, ArgList &Args,
@@ -124,6 +120,50 @@ generateOptimizationRemarkRegex(DiagnosticEngine &Diags, ArgList &Args,
     Pattern.reset();
   }
   return Pattern;
+}
+
+// Lifted from the clang driver.
+static void PrintArg(raw_ostream &OS, const char *Arg, StringRef TempDir) {
+  const bool Escape = std::strpbrk(Arg, "\"\\$ ");
+
+  if (!TempDir.empty() && StringRef(Arg).startswith(TempDir)) {
+    // Don't write temporary file names in the debug info. This would prevent
+    // incremental llvm compilation because we would generate different IR on
+    // every compiler invocation.
+    Arg = "<temporary-file>";
+  }
+
+  if (!Escape) {
+    OS << Arg;
+    return;
+  }
+
+  // Quote and escape. This isn't really complete, but good enough.
+  OS << '"';
+  while (const char c = *Arg++) {
+    if (c == '"' || c == '\\' || c == '$')
+      OS << '\\';
+    OS << c;
+  }
+  OS << '"';
+}
+
+/// Save a copy of any flags marked as ParseableInterfaceOption, if running
+/// in a mode that is going to emit a .swiftinterface file.
+static void SaveParseableInterfaceArgs(ParseableInterfaceOptions &Opts,
+                                       FrontendOptions &FOpts,
+                                       ArgList &Args, DiagnosticEngine &Diags) {
+  if (!FOpts.InputsAndOutputs.hasParseableInterfaceOutputPath())
+    return;
+  ArgStringList RenderedArgs;
+  for (auto A : Args) {
+    if (A->getOption().hasFlag(options::ParseableInterfaceOption))
+      A->render(Args, RenderedArgs);
+  }
+  llvm::raw_string_ostream OS(Opts.ParseableInterfaceFlags);
+  interleave(RenderedArgs,
+             [&](const char *Argument) { PrintArg(OS, Argument, StringRef()); },
+             [&] { OS << " "; });
 }
 
 static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
@@ -158,8 +198,17 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
   Opts.DiagnosticsEditorMode |= Args.hasArg(OPT_diagnostics_editor_mode,
                                             OPT_serialize_diagnostics_path);
 
-  Opts.EnableExperimentalPropertyBehaviors |=
-    Args.hasArg(OPT_enable_experimental_property_behaviors);
+  Opts.EnableExperimentalStaticAssert |=
+    Args.hasArg(OPT_enable_experimental_static_assert);
+
+  Opts.EnableOperatorDesignatedTypes |=
+      Args.hasArg(OPT_enable_operator_designated_types);
+
+  // Always enable operator designated types for the standard library.
+  Opts.EnableOperatorDesignatedTypes |= FrontendOpts.ParseStdlib;
+
+  Opts.SolverEnableOperatorDesignatedTypes |=
+      Args.hasArg(OPT_solver_enable_operator_designated_types);
 
   if (auto A = Args.getLastArg(OPT_enable_deserialization_recovery,
                                OPT_disable_deserialization_recovery)) {
@@ -219,6 +268,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.BuildSyntaxTree = true;
     Opts.VerifySyntaxTree = true;
   }
+  
+  if (Args.hasArg(OPT_enable_experimental_dependencies))
+    Opts.EnableExperimentalDependencies = true;
 
   Opts.DebuggerSupport |= Args.hasArg(OPT_debugger_support);
   if (Opts.DebuggerSupport)
@@ -259,6 +311,10 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.EvaluatorCycleDiagnostics = CycleDiagnosticKind::DebugDiagnose;
   }
 
+  if (const Arg *A = Args.getLastArg(OPT_output_request_graphviz)) {
+    Opts.RequestEvaluatorGraphVizPath = A->getValue();
+  }
+
   if (const Arg *A = Args.getLastArg(OPT_solver_memory_threshold)) {
     unsigned threshold;
     if (StringRef(A->getValue()).getAsInteger(10, threshold)) {
@@ -281,7 +337,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
     Opts.SolverShrinkUnsolvedThreshold = threshold;
   }
 
-  if (const Arg *A = Args.getLastArg(OPT_solver_disable_shrink))
+  if (Args.getLastArg(OPT_solver_disable_shrink))
     Opts.SolverDisableShrink = true;
 
   if (const Arg *A = Args.getLastArg(OPT_value_recursion_threshold)) {
@@ -303,8 +359,7 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   Opts.EnableSwift3ObjCInference =
     Args.hasFlag(OPT_enable_swift3_objc_inference,
-                 OPT_disable_swift3_objc_inference,
-                 Opts.isSwiftVersion3());
+                 OPT_disable_swift3_objc_inference, false);
 
   if (Opts.EnableSwift3ObjCInference) {
     if (const Arg *A = Args.getLastArg(
@@ -316,6 +371,9 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
         Opts.WarnSwift3ObjCInference = Swift3ObjCInferenceWarnings::Complete;
     }
   }
+
+  Opts.WarnImplicitOverrides =
+    Args.hasArg(OPT_warn_implicit_overrides);
 
   Opts.EnableNSKeyedArchiverDiagnostics =
       Args.hasFlag(OPT_enable_nskeyedarchiver_diagnostics,
@@ -346,8 +404,6 @@ static bool ParseLangArgs(LangOptions &Opts, ArgList &Args,
                    Target.isOSDarwin());
   Opts.EnableSILOpaqueValues |= Args.hasArg(OPT_enable_sil_opaque_values);
 
-  Opts.EnableKeyPathResilience |= Args.hasArg(OPT_enable_key_path_resilience);
-  
 #if SWIFT_DARWIN_ENABLE_STABLE_ABI_BIT
   Opts.UseDarwinPreStableABIBit = false;
 #else
@@ -515,32 +571,6 @@ static bool ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   return false;
 }
 
-// Lifted from the clang driver.
-static void PrintArg(raw_ostream &OS, const char *Arg, StringRef TempDir) {
-  const bool Escape = std::strpbrk(Arg, "\"\\$ ");
-
-  if (StringRef(Arg).startswith(TempDir)) {
-    // Don't write temporary file names in the debug info. This would prevent
-    // incremental llvm compilation because we would generate different IR on
-    // every compiler invocation.
-    Arg = "<temporary-file>";
-  }
-
-  if (!Escape) {
-    OS << Arg;
-    return;
-  }
-
-  // Quote and escape. This isn't really complete, but good enough.
-  OS << '"';
-  while (const char c = *Arg++) {
-    if (c == '"' || c == '\\' || c == '$')
-      OS << '\\';
-    OS << c;
-  }
-  OS << '"';
-}
-
 /// Parse -enforce-exclusivity=... options
 void parseExclusivityEnforcementOptions(const llvm::opt::Arg *A,
                                         SILOptions &Opts,
@@ -598,14 +628,27 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
       return true;
     }
   }
+  if (Args.hasArg(OPT_sil_existential_specializer)) {
+    Opts.ExistentialSpecializer = true;
+  }
   if (const Arg *A = Args.getLastArg(OPT_num_threads)) {
     if (StringRef(A->getValue()).getAsInteger(10, Opts.NumThreads)) {
       Diags.diagnose(SourceLoc(), diag::error_invalid_arg_value,
                      A->getAsString(Args), A->getValue());
       return true;
     }
+    if (environmentVariableRequestedMaximumDeterminism()) {
+      Opts.NumThreads = 1;
+      Diags.diagnose(SourceLoc(), diag::remark_max_determinism_overriding,
+                     "-num-threads");
+    }
   }
-  
+
+  // If we're only emitting a module, stop optimizations once we've serialized
+  // the SIL for the module.
+  if (FEOpts.RequestedAction == FrontendOptions::ActionType::EmitModuleOnly)
+    Opts.StopOptimizationAfterSerialization = true;
+
   if (Args.hasArg(OPT_sil_merge_partial_modules))
     Opts.MergePartialModules = true;
 
@@ -688,10 +731,8 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
   Opts.DisableSILPartialApply |=
     Args.hasArg(OPT_disable_sil_partial_apply);
   Opts.EnableSILOwnership |= Args.hasArg(OPT_enable_sil_ownership);
-  Opts.AssumeUnqualifiedOwnershipWhenParsing
-    |= Args.hasArg(OPT_assume_parsing_unqualified_ownership_sil);
   Opts.EnableMandatorySemanticARCOpts |=
-      !Args.hasArg(OPT_disable_mandatory_semantic_arc_opts);
+      Args.hasArg(OPT_enable_mandatory_semantic_arc_opts);
   Opts.EnableLargeLoadableTypes |= Args.hasArg(OPT_enable_large_loadable_types);
 
   if (const Arg *A = Args.getLastArg(OPT_save_optimization_record_path))
@@ -725,8 +766,11 @@ static bool ParseSILArgs(SILOptions &Opts, ArgList &Args,
     Opts.VerifyExclusivity
       = A->getOption().matches(OPT_enable_verify_exclusivity);
   }
-  if (Opts.shouldOptimize() && !Opts.VerifyExclusivity)
+  // If runtime asserts are disabled in general, also disable runtime
+  // exclusivity checks unless explicitly requested.
+  if (Opts.RemoveRuntimeAsserts)
     Opts.EnforceExclusivityDynamic = false;
+
   if (const Arg *A = Args.getLastArg(options::OPT_enforce_exclusivity_EQ)) {
     parseExclusivityEnforcementOptions(A, Opts, Diags);
   }
@@ -937,6 +981,9 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
 
   Opts.PrintInlineTree |= Args.hasArg(OPT_print_llvm_inline_tree);
 
+  Opts.EnableDynamicReplacementChaining |=
+      Args.hasArg(OPT_enable_dynamic_replacement_chaining);
+
   Opts.UseSwiftCall = Args.hasArg(OPT_enable_swiftcall);
 
   // This is set to true by default.
@@ -1002,6 +1049,14 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Opts.EnableResilienceBypass = true;
   }
 
+  // PE/COFF cannot deal with the cross-module reference to the metadata parent
+  // (e.g. NativeObject).  Force the lazy initialization of the VWT always.
+  Opts.LazyInitializeClassMetadata = Triple.isOSBinFormatCOFF();
+
+  if (const Arg *A = Args.getLastArg(OPT_read_type_info_path_EQ)) {
+    Opts.ReadTypeInfoPath = A->getValue();
+  }
+
   for (const auto &Lib : Args.getAllArgValues(options::OPT_autolink_library))
     Opts.LinkLibraries.push_back(LinkLibrary(Lib, LibraryKind::Library));
 
@@ -1022,9 +1077,11 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
   return false;
 }
 
-static std::string getScriptFileName(StringRef name, bool isSwiftVersion3) {
-  StringRef langVer = isSwiftVersion3 ? "3" : "4";
-  return (Twine(name) + langVer + ".json").str();
+static std::string getScriptFileName(StringRef name, version::Version &ver) {
+  if (ver.isVersionAtLeast(4, 2))
+    return (Twine(name) + "42" + ".json").str();
+  else
+    return (Twine(name) + "4" + ".json").str();
 }
 
 static bool ParseMigratorArgs(MigratorOptions &Opts,
@@ -1057,7 +1114,6 @@ static bool ParseMigratorArgs(MigratorOptions &Opts,
     Opts.APIDigesterDataStorePaths.push_back(DataPath->getValue());
   } else {
     auto &Triple = LangOpts.Target;
-    bool isSwiftVersion3 = LangOpts.isSwiftVersion3();
 
     llvm::SmallString<128> basePath;
     if (auto DataDir = Args.getLastArg(OPT_api_diff_data_dir)) {
@@ -1069,25 +1125,20 @@ static bool ParseMigratorArgs(MigratorOptions &Opts,
 
     bool Supported = true;
     llvm::SmallString<128> dataPath(basePath);
-
+    auto &langVer = LangOpts.EffectiveLanguageVersion;
     if (Triple.isMacOSX())
-      llvm::sys::path::append(dataPath,
-                              getScriptFileName("macos", isSwiftVersion3));
+      llvm::sys::path::append(dataPath, getScriptFileName("macos", langVer));
     else if (Triple.isiOS())
-      llvm::sys::path::append(dataPath,
-                              getScriptFileName("ios", isSwiftVersion3));
+      llvm::sys::path::append(dataPath, getScriptFileName("ios", langVer));
     else if (Triple.isTvOS())
-      llvm::sys::path::append(dataPath,
-                              getScriptFileName("tvos", isSwiftVersion3));
+      llvm::sys::path::append(dataPath, getScriptFileName("tvos", langVer));
     else if (Triple.isWatchOS())
-      llvm::sys::path::append(dataPath,
-                              getScriptFileName("watchos", isSwiftVersion3));
+      llvm::sys::path::append(dataPath, getScriptFileName("watchos", langVer));
     else
       Supported = false;
     if (Supported) {
       llvm::SmallString<128> authoredDataPath(basePath);
-      llvm::sys::path::append(authoredDataPath,
-                              getScriptFileName("overlay", isSwiftVersion3));
+      llvm::sys::path::append(authoredDataPath, getScriptFileName("overlay", langVer));
       // Add authored list first to take higher priority.
       Opts.APIDigesterDataStorePaths.push_back(authoredDataPath.str());
       Opts.APIDigesterDataStorePaths.push_back(dataPath.str());
@@ -1151,6 +1202,9 @@ bool CompilerInvocation::parseArgs(
     return true;
   }
 
+  SaveParseableInterfaceArgs(ParseableInterfaceOpts, FrontendOpts,
+                             ParsedArgs, Diags);
+
   if (ParseLangArgs(LangOpts, ParsedArgs, Diags, FrontendOpts)) {
     return true;
   }
@@ -1203,6 +1257,7 @@ CompilerInvocation::loadFromSerializedAST(StringRef data) {
   if (info.status != serialization::Status::Valid)
     return info.status;
 
+  LangOpts.EffectiveLanguageVersion = info.compatibilityVersion;
   setTargetTriple(info.targetTriple);
   if (!extendedInfo.getSDKPath().empty())
     setSDKPath(extendedInfo.getSDKPath());

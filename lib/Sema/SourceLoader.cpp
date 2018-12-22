@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief A simple module loader that loads .swift source files.
+/// A simple module loader that loads .swift source files.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -109,7 +109,9 @@ ModuleDecl *SourceLoader::loadModule(SourceLoc importLoc,
   std::unique_ptr<llvm::MemoryBuffer> inputFile =
     std::move(inputFileOrError.get());
 
-  addDependency(inputFile->getBufferIdentifier());
+  if (dependencyTracker)
+    dependencyTracker->addDependency(inputFile->getBufferIdentifier(),
+                                     /*isSystem=*/false);
 
   // Turn off debugging while parsing other modules.
   llvm::SaveAndRestore<bool> turnOffDebug(Ctx.LangOpts.DebugConstraintSolver,
@@ -138,7 +140,7 @@ ModuleDecl *SourceLoader::loadModule(SourceLoc importLoc,
   importMod->addFile(*importFile);
 
   bool done;
-  PersistentParserState persistentState;
+  PersistentParserState persistentState(Ctx);
   SkipNonTransparentFunctions delayCallbacks;
   parseIntoSourceFile(*importFile, bufferID, &done, nullptr, &persistentState,
                       SkipBodies ? &delayCallbacks : nullptr);

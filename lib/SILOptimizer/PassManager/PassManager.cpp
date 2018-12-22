@@ -14,6 +14,7 @@
 
 #include "swift/SILOptimizer/PassManager/PassManager.h"
 #include "swift/Demangling/Demangle.h"
+#include "swift/SIL/ApplySite.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
@@ -724,7 +725,7 @@ void SILPassManager::restartWithCurrentFunction(SILTransform *T) {
   RestartPipeline = true;
 }
 
-/// \brief Reset the state of the pass manager and remove all transformation
+/// Reset the state of the pass manager and remove all transformation
 /// owned by the pass manager. Analysis passes will be kept.
 void SILPassManager::resetAndRemoveTransformations() {
   for (auto *T : Transformations)

@@ -28,6 +28,15 @@
 #include "llvm/ADT/StringSwitch.h"
 using namespace swift;
 
+#define DECL_ATTR(_, Id, ...) \
+  static_assert(IsTriviallyDestructible<Id##Attr>::value, \
+                "Attrs are BumpPtrAllocated; the destructor is never called");
+#include "swift/AST/Attr.def"
+static_assert(IsTriviallyDestructible<DeclAttributes>::value,
+              "DeclAttributes are BumpPtrAllocated; the d'tor is never called");
+static_assert(IsTriviallyDestructible<TypeAttributes>::value,
+              "TypeAttributes are BumpPtrAllocated; the d'tor is never called");
+
 
 // Only allow allocation of attributes using the allocator in ASTContext.
 void *AttributeBase::operator new(size_t Bytes, ASTContext &C,
@@ -203,6 +212,7 @@ void DeclAttributes::dump(const Decl *D) const {
 /// attribute (e.g., as @available(iOS 8.0, *). The presentation requires an
 /// introduction version and does not support deprecation, obsoletion, or
 /// messages.
+LLVM_READONLY
 static bool isShortAvailable(const DeclAttribute *DA) {
   auto *AvailAttr = dyn_cast<AvailableAttr>(DA);
   if (!AvailAttr)
@@ -223,9 +233,15 @@ static bool isShortAvailable(const DeclAttribute *DA) {
   if (!AvailAttr->Rename.empty())
     return false;
 
-  if (AvailAttr->PlatformAgnostic != PlatformAgnosticAvailabilityKind::None &&
-      !AvailAttr->isLanguageVersionSpecific())
+  switch (AvailAttr->PlatformAgnostic) {
+  case PlatformAgnosticAvailabilityKind::Deprecated:
+  case PlatformAgnosticAvailabilityKind::Unavailable:
+  case PlatformAgnosticAvailabilityKind::UnavailableInSwift:
     return false;
+  case PlatformAgnosticAvailabilityKind::None:
+  case PlatformAgnosticAvailabilityKind::SwiftVersionSpecific:
+    return true;
+  }
 
   return true;
 }
@@ -243,7 +259,7 @@ static void printShortFormAvailable(ArrayRef<const DeclAttribute *> Attrs,
   assert(!Attrs.empty());
 
   Printer << "@available(";
-  auto FirstAvail = dyn_cast<AvailableAttr>(Attrs[0]);
+  auto FirstAvail = cast<AvailableAttr>(Attrs.front());
   if (Attrs.size() == 1 &&
       FirstAvail->isLanguageVersionSpecific()) {
     assert(FirstAvail->Introduced.hasValue());
@@ -273,6 +289,7 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
 
   // Process attributes in passes.
   AttributeVector shortAvailableAttributes;
+  const DeclAttribute *swiftVersionAvailableAttribute = nullptr;
   AttributeVector longAttributes;
   AttributeVector attributes;
   AttributeVector modifiers;
@@ -286,6 +303,16 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
     if (Options.excludeAttrKind(DA->getKind()))
       continue;
 
+    // Be careful not to coalesce `@available(swift 5)` with other short
+    // `available' attributes.
+    if (auto *availableAttr = dyn_cast<AvailableAttr>(DA)) {
+      if (availableAttr->isLanguageVersionSpecific() &&
+          isShortAvailable(availableAttr)) {
+        swiftVersionAvailableAttribute = availableAttr;
+        continue;
+      }
+    }
+
     AttributeVector &which = DA->isDeclModifier() ? modifiers :
                              isShortAvailable(DA) ? shortAvailableAttributes :
                              DA->isLongAttribute() ? longAttributes :
@@ -293,9 +320,10 @@ void DeclAttributes::print(ASTPrinter &Printer, const PrintOptions &Options,
     which.push_back(DA);
   }
 
-  if (!shortAvailableAttributes.empty()) {
+  if (swiftVersionAvailableAttribute)
+    printShortFormAvailable(swiftVersionAvailableAttribute, Printer, Options);
+  if (!shortAvailableAttributes.empty())
     printShortFormAvailable(shortAvailableAttributes, Printer, Options);
-  }
 
   for (auto DA : longAttributes)
     DA->print(Printer, Options, D);
@@ -440,6 +468,12 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     }
     break;
   }
+
+  case DAK_PrivateImport: {
+    Printer.printAttrName("@_private(sourceFile: \"");
+    Printer << cast<PrivateImportAttr>(this)->getSourceFile() << "\")";
+    break;
+  }
     
   case DAK_SwiftNativeObjCRuntimeBase: {
     auto *attr = cast<SwiftNativeObjCRuntimeBaseAttr>(this);
@@ -518,6 +552,14 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     break;
   }
 
+  case DAK_DynamicReplacement: {
+    Printer.printAttrName("@_dynamicReplacement");
+    Printer << "(for: \"";
+    auto *attr = cast<DynamicReplacementAttr>(this);
+    Printer << attr->getReplacedFunctionName() << "\")";
+    break;
+  }
+
   case DAK_Count:
     llvm_unreachable("exceed declaration attribute kinds");
 
@@ -584,6 +626,10 @@ StringRef DeclAttribute::getAttrName() const {
   case DAK_ObjC:
   case DAK_ObjCRuntimeName:
     return "objc";
+  case DAK_DynamicReplacement:
+    return "_dynamicReplacement";
+  case DAK_PrivateImport:
+    return "_private";
   case DAK_RestatedObjCConformance:
     return "_restatedObjCConformance";
   case DAK_Inline: {
@@ -610,15 +656,15 @@ StringRef DeclAttribute::getAttrName() const {
   case DAK_Effects:
     switch (cast<EffectsAttr>(this)->getKind()) {
       case EffectsKind::ReadNone:
-        return "effects(readnone)";
+        return "_effects(readnone)";
       case EffectsKind::ReadOnly:
-        return "effects(readonly)";
+        return "_effects(readonly)";
       case EffectsKind::ReleaseNone:
-        return "effects(releasenone)";
+        return "_effects(releasenone)";
       case EffectsKind::ReadWrite:
-        return "effects(readwrite)";
+        return "_effects(readwrite)";
       case EffectsKind::Unspecified:
-        return "effects(unspecified)";
+        return "_effects(unspecified)";
     }
   case DAK_AccessControl:
   case DAK_SetterAccess: {
@@ -746,6 +792,66 @@ ObjCAttr *ObjCAttr::clone(ASTContext &context) const {
   auto attr = new (context) ObjCAttr(getName(), isNameImplicit());
   attr->setSwift3Inferred(isSwift3Inferred());
   return attr;
+}
+
+PrivateImportAttr::PrivateImportAttr(SourceLoc atLoc, SourceRange baseRange,
+                                     StringRef sourceFile,
+                                     SourceRange parenRange)
+    : DeclAttribute(DAK_PrivateImport, atLoc, baseRange, /*Implicit=*/false),
+      SourceFile(sourceFile) {}
+
+PrivateImportAttr *PrivateImportAttr::create(ASTContext &Ctxt, SourceLoc AtLoc,
+                                             SourceLoc PrivateLoc,
+                                             SourceLoc LParenLoc,
+                                             StringRef sourceFile,
+                                             SourceLoc RParenLoc) {
+  return new (Ctxt)
+      PrivateImportAttr(AtLoc, SourceRange(PrivateLoc, RParenLoc), sourceFile,
+                        SourceRange(LParenLoc, RParenLoc));
+}
+
+DynamicReplacementAttr::DynamicReplacementAttr(SourceLoc atLoc,
+                                               SourceRange baseRange,
+                                               DeclName name,
+                                               SourceRange parenRange)
+    : DeclAttribute(DAK_DynamicReplacement, atLoc, baseRange,
+                    /*Implicit=*/false),
+      ReplacedFunctionName(name), ReplacedFunction(nullptr) {
+  Bits.DynamicReplacementAttr.HasTrailingLocationInfo = true;
+  getTrailingLocations()[0] = parenRange.Start;
+  getTrailingLocations()[1] = parenRange.End;
+}
+
+DynamicReplacementAttr *
+DynamicReplacementAttr::create(ASTContext &Ctx, SourceLoc AtLoc,
+                               SourceLoc DynReplLoc, SourceLoc LParenLoc,
+                               DeclName ReplacedFunction, SourceLoc RParenLoc) {
+  void *mem = Ctx.Allocate(totalSizeToAlloc<SourceLoc>(2),
+                           alignof(DynamicReplacementAttr));
+  return new (mem) DynamicReplacementAttr(
+      AtLoc, SourceRange(DynReplLoc, RParenLoc), ReplacedFunction,
+      SourceRange(LParenLoc, RParenLoc));
+}
+
+DynamicReplacementAttr *DynamicReplacementAttr::create(ASTContext &Ctx,
+                                                       DeclName name) {
+  return new (Ctx) DynamicReplacementAttr(name);
+}
+
+DynamicReplacementAttr *
+DynamicReplacementAttr::create(ASTContext &Ctx, DeclName name,
+                               AbstractFunctionDecl *f) {
+  auto res = new (Ctx) DynamicReplacementAttr(name);
+  res->setReplacedFunction(f);
+  return res;
+}
+
+SourceLoc DynamicReplacementAttr::getLParenLoc() const {
+  return getTrailingLocations()[0];
+}
+
+SourceLoc DynamicReplacementAttr::getRParenLoc() const {
+  return getTrailingLocations()[1];
 }
 
 AvailableAttr *

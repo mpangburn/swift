@@ -104,37 +104,37 @@ public:
   void run();
 
 private:
-  /// \brief Promote AllocStacks into SSA.
+  /// Promote AllocStacks into SSA.
   void promoteAllocationToPhi();
 
-  /// \brief Replace the dummy nodes with new block arguments.
+  /// Replace the dummy nodes with new block arguments.
   void addBlockArguments(BlockSet &PhiBlocks);
 
-  /// \brief Fix all of the branch instructions and the uses to use
+  /// Fix all of the branch instructions and the uses to use
   /// the AllocStack definitions (which include stores and Phis).
   void fixBranchesAndUses(BlockSet &Blocks);
 
-  /// \brief update the branch instructions with the new Phi argument.
+  /// update the branch instructions with the new Phi argument.
   /// The blocks in \p PhiBlocks are blocks that define a value, \p Dest is
   /// the branch destination, and \p Pred is the predecessors who's branch we
   /// modify.
   void fixPhiPredBlock(BlockSet &PhiBlocks, SILBasicBlock *Dest,
                        SILBasicBlock *Pred);
 
-  /// \brief Get the value for this AllocStack variable that is
+  /// Get the value for this AllocStack variable that is
   /// flowing out of StartBB.
   SILValue getLiveOutValue(BlockSet &PhiBlocks, SILBasicBlock *StartBB);
 
-  /// \brief Get the value for this AllocStack variable that is
+  /// Get the value for this AllocStack variable that is
   /// flowing into BB.
   SILValue getLiveInValue(BlockSet &PhiBlocks, SILBasicBlock *BB);
 
-  /// \brief Prune AllocStacks usage in the function. Scan the function
+  /// Prune AllocStacks usage in the function. Scan the function
   /// and remove in-block usage of the AllocStack. Leave only the first
   /// load and the last store.
   void pruneAllocStackUsage();
 
-  /// \brief Promote all of the AllocStacks in a single basic block in one
+  /// Promote all of the AllocStacks in a single basic block in one
   /// linear scan. This function deletes all of the loads and stores except
   /// for the first load and the last store.
   /// \returns the last StoreInst found or zero if none found.
@@ -155,10 +155,10 @@ class MemoryToRegisters {
   /// The builder used to create new instructions during register promotion.
   SILBuilder B;
 
-  /// \brief Check if the AllocStackInst \p ASI is only written into.
+  /// Check if the AllocStackInst \p ASI is only written into.
   bool isWriteOnlyAllocation(AllocStackInst *ASI);
 
-  /// \brief Promote all of the AllocStacks in a single basic block in one
+  /// Promote all of the AllocStacks in a single basic block in one
   /// linear scan. Note: This function deletes all of the users of the
   /// AllocStackInst, including the DeallocStackInst but it does not remove the
   /// AllocStackInst itself!
@@ -174,7 +174,7 @@ public:
   MemoryToRegisters(SILFunction &Func, DominanceInfo *Dt) : F(Func), DT(Dt),
                                                             B(Func) {}
 
-  /// \brief Promote memory to registers. Return True on change.
+  /// Promote memory to registers. Return True on change.
   bool run();
 };
 
@@ -199,6 +199,20 @@ static bool isAddressForLoad(SILInstruction *I, SILBasicBlock *&singleBlock) {
     
     if (!isAddressForLoad(II, singleBlock))
         return false;
+  }
+  return true;
+}
+
+/// Returns true if \p I is a dead struct_element_addr or tuple_element_addr.
+static bool isDeadAddrProjection(SILInstruction *I) {
+  if (!isa<StructElementAddrInst>(I) && !isa<TupleElementAddrInst>(I))
+    return false;
+
+  // Recursively search for uses which are dead themselves.
+  for (auto UI : cast<SingleValueInstruction>(I)->getUses()) {
+    SILInstruction *II = UI->getUser();
+    if (!isDeadAddrProjection(II))
+      return false;
   }
   return true;
 }
@@ -264,6 +278,9 @@ bool MemoryToRegisters::isWriteOnlyAllocation(AllocStackInst *ASI) {
     // If we haven't already promoted the AllocStack, we may see
     // DebugValueAddr uses.
     if (isa<DebugValueAddrInst>(II))
+      continue;
+
+    if (isDeadAddrProjection(II))
       continue;
 
     // Can't do anything else with it.
@@ -468,8 +485,8 @@ void MemoryToRegisters::removeSingleBlockAllocation(AllocStackInst *ASI) {
     // with our running value.
     if (isLoadFromStack(Inst, ASI)) {
       if (!RunningVal) {
-        assert(ASI->getElementType().isVoid() &&
-               "Expected initialization of non-void type!");
+        // Loading without a previous store is only acceptable if the type is
+        // Void (= empty tuple) or a tuple of Voids.
         RunningVal = SILUndef::get(ASI->getElementType(), ASI->getModule());
       }
       replaceLoad(cast<LoadInst>(Inst), RunningVal, ASI);
@@ -538,7 +555,7 @@ void StackAllocationPromoter::addBlockArguments(BlockSet &PhiBlocks) {
   LLVM_DEBUG(llvm::dbgs() << "*** Adding new block arguments.\n");
 
   for (auto *Block : PhiBlocks)
-    Block->createPHIArgument(ASI->getElementType(), ValueOwnershipKind::Owned);
+    Block->createPhiArgument(ASI->getElementType(), ValueOwnershipKind::Owned);
 }
 
 SILValue
@@ -889,7 +906,7 @@ bool MemoryToRegisters::promoteSingleAllocation(AllocStackInst *alloc,
 bool MemoryToRegisters::run() {
   bool Changed = false;
 
-  Changed = splitAllCriticalEdges(F, true, DT, nullptr);
+  F.verifyCriticalEdges();
 
   // Compute dominator tree node levels for the function.
   DomTreeLevelMap DomTreeLevels;

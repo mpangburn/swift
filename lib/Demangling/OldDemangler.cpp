@@ -688,9 +688,9 @@ private:
                               Node::Kind::GenericSpecializationNotReAbstracted :
                               Node::Kind::GenericSpecialization);
 
-      // Create a node if the specialization is externally inlinable.
+      // Create a node if the specialization is serialized.
       if (Mangled.nextIf("q")) {
-        auto kind = Node::Kind::SpecializationIsFragile;
+        auto kind = Node::Kind::IsSerialized;
         spec->addChild(Factory.createNode(kind), Factory);
       }
 
@@ -705,9 +705,9 @@ private:
       auto spec =
           Factory.createNode(Node::Kind::FunctionSignatureSpecialization);
 
-      // Create a node if the specialization is externally inlinable.
+      // Create a node if the specialization is serialized.
       if (Mangled.nextIf("q")) {
-        auto kind = Node::Kind::SpecializationIsFragile;
+        auto kind = Node::Kind::IsSerialized;
         spec->addChild(Factory.createNode(kind), Factory);
       }
 
@@ -1017,6 +1017,8 @@ private:
         parentOrModule->getKind() != Node::Kind::Function &&
         parentOrModule->getKind() != Node::Kind::Extension) {
       parentOrModule = demangleBoundGenericArgs(parentOrModule);
+      if (!parentOrModule)
+        return nullptr;
 
       // Rebuild this type with the new parent type, which may have
       // had its generic arguments applied.

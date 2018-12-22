@@ -16,12 +16,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description='Utility for testing incremental syntax parsing',
         epilog='''
-    Based of a single template the utility generates a pre-edit and a post-edit 
-    file. It then verifies that incrementally parsing the post-edit file base 
-    on the pre-edit file results in the same syntax tree as reparsing the 
+    Based of a single template the utility generates a pre-edit and a post-edit
+    file. It then verifies that incrementally parsing the post-edit file base
+    on the pre-edit file results in the same syntax tree as reparsing the
     post-edit file from scratch.
 
-    To generate the pre-edit and the post-edit file from the template, it 
+    To generate the pre-edit and the post-edit file from the template, it
     operates on markers of the form:
 
         <<test_case<pre|||post>>>
@@ -46,8 +46,13 @@ def main():
         '--swift-syntax-test', required=True,
         help='The path to swift-syntax-test')
     parser.add_argument(
-        '--swift-swiftsyntax-test', required=True,
-        help='The path to swift-swiftsyntax-test')
+        '--swiftsyntax-lit-test-helper', required=True,
+        help='The path to the lit-test-helper binary of SwiftSyntax')
+    parser.add_argument(
+        '--serialization-format', choices=['json', 'byteTree'],
+        default='json', help='''
+    The format that shall be used to transfer the syntax tree
+    ''')
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -56,15 +61,18 @@ def main():
     test_case = args.test_case
     temp_dir = args.temp_dir
     swift_syntax_test = args.swift_syntax_test
-    swift_swiftsyntax_test = args.swift_swiftsyntax_test
+    swiftsyntax_lit_test_helper = args.swiftsyntax_lit_test_helper
+    serialization_format = args.serialization_format
 
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
 
+    treeFileExtension = serialization_format
+
     pre_edit_tree_file = temp_dir + '/' + test_file_name + '.' \
-        + test_case + '.pre.json'
+        + test_case + '.pre.' + treeFileExtension
     incremental_tree_file = temp_dir + '/' + test_file_name + '.' \
-        + test_case + '.incr.json'
+        + test_case + '.incr.' + treeFileExtension
     post_edit_source_file = temp_dir + '/' + test_file_name + '.' \
         + test_case + '.post.swift'
     after_roundtrip_source_file = temp_dir + '/' + test_file_name + '.' \
@@ -72,38 +80,41 @@ def main():
 
     # Generate the syntax tree once incrementally and once from scratch
     try:
-        serializeIncrParseMarkupFile(test_file=test_file, 
-                                     test_case=test_case, 
-                                     mode='pre-edit', 
+        serializeIncrParseMarkupFile(test_file=test_file,
+                                     test_case=test_case,
+                                     mode='pre-edit',
                                      serialization_mode='full',
+                                     serialization_format=serialization_format,
                                      omit_node_ids=False,
-                                     output_file=pre_edit_tree_file, 
-                                     temp_dir=temp_dir, 
-                                     swift_syntax_test=swift_syntax_test, 
+                                     output_file=pre_edit_tree_file,
+                                     temp_dir=temp_dir,
+                                     swift_syntax_test=swift_syntax_test,
                                      print_visual_reuse_info=False)
 
-        serializeIncrParseMarkupFile(test_file=test_file, 
-                                     test_case=test_case, 
-                                     mode='incremental', 
+        serializeIncrParseMarkupFile(test_file=test_file,
+                                     test_case=test_case,
+                                     mode='incremental',
                                      serialization_mode='incremental',
+                                     serialization_format=serialization_format,
                                      omit_node_ids=False,
-                                     output_file=incremental_tree_file, 
-                                     temp_dir=temp_dir, 
-                                     swift_syntax_test=swift_syntax_test, 
+                                     output_file=incremental_tree_file,
+                                     temp_dir=temp_dir,
+                                     swift_syntax_test=swift_syntax_test,
                                      print_visual_reuse_info=False)
     except TestFailedError as e:
-        print('Test case "%s" of %s FAILed' % (test_case, test_file), 
+        print('Test case "%s" of %s FAILed' % (test_case, test_file),
               file=sys.stderr)
         print(e.message, file=sys.stderr)
         sys.exit(1)
 
     try:
-        run_command([swift_swiftsyntax_test, '-deserialize-incremental'] +
+        run_command([swiftsyntax_lit_test_helper, '-deserialize-incremental'] +
+                    ['-serialization-format', serialization_format] +
                     ['-pre-edit-tree', pre_edit_tree_file] +
                     ['-incr-tree', incremental_tree_file] +
                     ['-out', after_roundtrip_source_file])
     except subprocess.CalledProcessError as e:
-        print('Test case "%s" of %s FAILed' % (test_case, test_file), 
+        print('Test case "%s" of %s FAILed' % (test_case, test_file),
               file=sys.stderr)
         print('Deserializing the swift file failed:\n', file=sys.stderr)
         print(e.output, file=sys.stderr)
@@ -118,10 +129,10 @@ def main():
                 after_roundtrip_source_file
             ])
     except subprocess.CalledProcessError as e:
-        print('Test case "%s" of %s FAILed' % (test_case, test_file), 
+        print('Test case "%s" of %s FAILed' % (test_case, test_file),
               file=sys.stderr)
         print('Source file after incrementally transferring the syntax tree '
-              'to swiftSyntax does not match post-edit source file:\n\n', 
+              'to swiftSyntax does not match post-edit source file:\n\n',
               file=sys.stderr)
         print(e.output, file=sys.stderr)
         sys.exit(1)

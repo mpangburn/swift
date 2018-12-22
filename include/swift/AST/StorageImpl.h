@@ -27,6 +27,18 @@ enum StorageIsMutable_t : bool {
   StorageIsMutable = true
 };
 
+enum class OpaqueReadOwnership : uint8_t {
+  /// An opaque read produces an owned value.
+  Owned,
+
+  /// An opaque read produces a borrowed value.
+  Borrowed,
+
+  /// An opaque read can be either owned or borrowed, depending on the
+  /// preference of the caller.
+  OwnedOrBorrowed
+};
+
 // Note that the values of these enums line up with %select values in
 // diagnostics.
 enum class AccessorKind {
@@ -41,23 +53,6 @@ static inline IntRange<AccessorKind> allAccessorKinds() {
   return IntRange<AccessorKind>(AccessorKind(0),
                                 AccessorKind(NumAccessorKinds));
 }
-
-/// The safety semantics of this addressor.
-enum class AddressorKind : uint8_t {
-  /// \brief This is not an addressor.
-  NotAddressor,
-  /// \brief This is an unsafe addressor; it simply returns an address.
-  Unsafe,
-  /// \brief This is an owning addressor; it returns an AnyObject
-  /// which should be released when the caller is done with the object.
-  Owning,
-  /// \brief This is an owning addressor; it returns a Builtin.NativeObject
-  /// which should be released when the caller is done with the object.
-  NativeOwning,
-  /// \brief This is a pinning addressor; it returns a Builtin.NativeObject?
-  /// which should be unpinned when the caller is done with the object.
-  NativePinning,
-};
 
 /// Whether an access to storage is for reading, writing, or both.
 enum class AccessKind : uint8_t {
@@ -85,10 +80,6 @@ public:
     /// that storage directly.
     Storage,
 
-    /// The decl is a VarDecl with storage defined by a property behavior;
-    /// this access may initialize or reassign the storage based on dataflow.
-    BehaviorStorage,
-
     /// Directly call an accessor of some sort.  The strategy includes
     /// an accessor kind.
     DirectToAccessor,
@@ -112,7 +103,7 @@ private:
 
   AccessStrategy(Kind kind)
     : TheKind(kind) {
-    assert(kind == Storage || kind == BehaviorStorage);
+    assert(kind == Storage);
   }
 
   AccessStrategy(Kind kind, AccessorKind accessor)
@@ -136,10 +127,6 @@ public:
     return { Storage };
   }
 
-  static AccessStrategy getBehaviorStorage() {
-    return { BehaviorStorage };
-  }
-
   static AccessStrategy getAccessor(AccessorKind accessor, bool dispatched) {
     return { dispatched ? DispatchToAccessor : DirectToAccessor, accessor };
   }
@@ -151,8 +138,12 @@ public:
 
   Kind getKind() const { return TheKind; }
 
+  bool hasAccessor() const {
+    return TheKind == DirectToAccessor || TheKind == DispatchToAccessor;
+  }
+
   AccessorKind getAccessor() const {
-    assert(TheKind == DirectToAccessor || TheKind == DispatchToAccessor);
+    assert(hasAccessor());
     return FirstAccessor;
   }
 
@@ -223,10 +214,6 @@ enum class ReadWriteImplKind {
   /// There's storage.
   Stored,
 
-  /// There's a materializeForSet.  (This is currently only used for opaque
-  /// declarations.)
-  MaterializeForSet,
-
   /// There's a mutable addressor.
   MutableAddress,
 
@@ -292,7 +279,6 @@ public:
              readImpl == ReadImplKind::Address ||
              readImpl == ReadImplKind::Read);
       assert(readWriteImpl == ReadWriteImplKind::MaterializeToTemporary ||
-             readWriteImpl == ReadWriteImplKind::MaterializeForSet ||
              readWriteImpl == ReadWriteImplKind::Modify);
       return;
 
@@ -322,20 +308,21 @@ public:
                        : ReadWriteImplKind::Immutable };
   }
 
-  static StorageImplInfo getOpaque(StorageIsMutable_t isMutable) {
-    return (isMutable ? getMutableOpaque()
-                      : getImmutableOpaque());
+  static StorageImplInfo getOpaque(StorageIsMutable_t isMutable,
+                                   OpaqueReadOwnership ownership) {
+    return (isMutable ? getMutableOpaque(ownership)
+                      : getImmutableOpaque(ownership));
   }
 
   /// Describe the implementation of a immutable property implemented opaquely.
-  static StorageImplInfo getImmutableOpaque() {
-    return { ReadImplKind::Get };
+  static StorageImplInfo getImmutableOpaque(OpaqueReadOwnership ownership) {
+    return { getOpaqueReadImpl(ownership) };
   }
 
   /// Describe the implementation of a mutable property implemented opaquely.
-  static StorageImplInfo getMutableOpaque() {
-    return { ReadImplKind::Get, WriteImplKind::Set,
-             ReadWriteImplKind::MaterializeForSet };
+  static StorageImplInfo getMutableOpaque(OpaqueReadOwnership ownership) {
+    return { getOpaqueReadImpl(ownership), WriteImplKind::Set,
+             ReadWriteImplKind::Modify };
   }
 
   static StorageImplInfo getComputed(StorageIsMutable_t isMutable) {
@@ -381,6 +368,18 @@ public:
   }
   ReadWriteImplKind getReadWriteImpl() const {
     return ReadWriteImplKind(ReadWrite);
+  }
+
+private:
+  static ReadImplKind getOpaqueReadImpl(OpaqueReadOwnership ownership) {
+    switch (ownership) {
+    case OpaqueReadOwnership::Owned:
+      return ReadImplKind::Get;
+    case OpaqueReadOwnership::OwnedOrBorrowed:
+    case OpaqueReadOwnership::Borrowed:
+      return ReadImplKind::Read;
+    }
+    llvm_unreachable("bad read-ownership kind");
   }
 };
 

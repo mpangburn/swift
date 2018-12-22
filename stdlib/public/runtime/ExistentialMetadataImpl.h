@@ -328,7 +328,20 @@ struct LLVM_LIBRARY_VISIBILITY OpaqueExistentialBox
   static constexpr size_t stride = sizeof(Container);
   static constexpr size_t isPOD = false;
   static constexpr bool isBitwiseTakable = true;
-  static constexpr unsigned numExtraInhabitants = 0;
+  static constexpr unsigned numExtraInhabitants =
+    swift_getHeapObjectExtraInhabitantCount();
+
+  static void storeExtraInhabitantTag(Container *dest, unsigned tag) {
+    swift_storeHeapObjectExtraInhabitant(
+        const_cast<HeapObject **>(
+            reinterpret_cast<const HeapObject **>(&dest->Header.Type)),
+        tag - 1);
+  }
+
+  static unsigned getExtraInhabitantTag(const Container *src) {
+    return swift_getHeapObjectExtraInhabitantIndex(const_cast<HeapObject **>(
+        reinterpret_cast<const HeapObject *const *>(&src->Header.Type))) + 1;
+  }
 };
 
 /// A non-fixed box implementation class for an opaque existential
@@ -371,7 +384,18 @@ struct LLVM_LIBRARY_VISIBILITY NonFixedOpaqueExistentialBox
   };
 
   using type = Container;
-  static constexpr unsigned numExtraInhabitants = 0;
+  static constexpr unsigned numExtraInhabitants =
+    swift_getHeapObjectExtraInhabitantCount();
+  
+  static void storeExtraInhabitantTag(Container *dest, unsigned tag) {
+    swift_storeHeapObjectExtraInhabitant(
+                            (HeapObject**)(uintptr_t)&dest->Header.Type, tag - 1);
+  }
+
+  static unsigned getExtraInhabitantTag(const Container *src) {
+    return swift_getHeapObjectExtraInhabitantIndex(
+                             (HeapObject* const *)(uintptr_t)&src->Header.Type) + 1;
+  }
 };
 
 /// A common base class for fixed and non-fixed class-existential box
@@ -428,15 +452,15 @@ struct LLVM_LIBRARY_VISIBILITY ClassExistentialBoxBase
   }
 
   template <class Container, class... A>
-  static void storeExtraInhabitant(Container *dest, int index, A... args) {
+  static void storeExtraInhabitantTag(Container *dest, unsigned tag, A... args) {
     swift_storeHeapObjectExtraInhabitant((HeapObject**) dest->getValueSlot(),
-                                         index);
+                                         tag - 1);
   }
 
   template <class Container, class... A>
-  static int getExtraInhabitantIndex(const Container *src, A... args) {
+  static int getExtraInhabitantTag(const Container *src, A... args) {
     return swift_getHeapObjectExtraInhabitantIndex(
-                                  (HeapObject* const *) src->getValueSlot());
+                                  (HeapObject* const *) src->getValueSlot()) + 1;
   }
   
 };
@@ -550,17 +574,17 @@ struct LLVM_LIBRARY_VISIBILITY ExistentialMetatypeBoxBase
   }
 
   template <class Container, class... A>
-  static void storeExtraInhabitant(Container *dest, int index, A... args) {
+  static void storeExtraInhabitantTag(Container *dest, unsigned tag, A... args) {
     Metadata **MD = const_cast<Metadata **>(dest->getValueSlot());
     swift_storeHeapObjectExtraInhabitant(reinterpret_cast<HeapObject **>(MD),
-                                         index);
+                                         tag - 1);
   }
 
   template <class Container, class... A>
-  static int getExtraInhabitantIndex(const Container *src, A... args) {
+  static int getExtraInhabitantTag(const Container *src, A... args) {
     Metadata **MD = const_cast<Metadata **>(src->getValueSlot());
     return swift_getHeapObjectExtraInhabitantIndex(
-        reinterpret_cast<HeapObject *const *>(MD));
+        reinterpret_cast<HeapObject *const *>(MD)) + 1;
   }
 };
 
@@ -600,7 +624,7 @@ struct LLVM_LIBRARY_VISIBILITY NonFixedExistentialMetatypeBox
     ExistentialMetatypeContainer Header;
 
     static unsigned getNumWitnessTables(const Metadata *self) {
-      auto castSelf = static_cast<const ExistentialTypeMetadata*>(self); 
+      auto castSelf = static_cast<const ExistentialMetatypeMetadata*>(self); 
       return castSelf->Flags.getNumWitnessTables();
     }
 

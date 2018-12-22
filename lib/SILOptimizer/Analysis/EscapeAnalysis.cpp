@@ -65,6 +65,8 @@ static SingleValueInstruction *isProjection(SILNode *node) {
 static bool isNonWritableMemoryAddress(SILNode *V) {
   switch (V->getKind()) {
   case SILNodeKind::FunctionRefInst:
+  case SILNodeKind::DynamicFunctionRefInst:
+  case SILNodeKind::PreviousDynamicFunctionRefInst:
   case SILNodeKind::WitnessMethodInst:
   case SILNodeKind::ClassMethodInst:
   case SILNodeKind::SuperMethodInst:
@@ -105,7 +107,8 @@ void EscapeAnalysis::ConnectionGraph::clear() {
 
 EscapeAnalysis::CGNode *EscapeAnalysis::ConnectionGraph::
 getNode(ValueBase *V, EscapeAnalysis *EA, bool createIfNeeded) {
-  if (isa<FunctionRefInst>(V))
+  if (isa<FunctionRefInst>(V) || isa<DynamicFunctionRefInst>(V) ||
+      isa<PreviousDynamicFunctionRefInst>(V))
     return nullptr;
   
   if (!EA->isPointer(V))
@@ -1120,7 +1123,7 @@ void EscapeAnalysis::buildConnectionGraph(FunctionInfo *FInfo,
         continue;
 
       llvm::SmallVector<SILValue,4> Incoming;
-      if (!BBArg->getIncomingValues(Incoming)) {
+      if (!BBArg->getSingleTerminatorOperands(Incoming)) {
         // We don't know where the block argument comes from -> treat it
         // conservatively.
         ConGraph->setEscapesGlobal(ArgNode);
@@ -1239,12 +1242,6 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
           return;
         }
         break;
-      case ArrayCallKind::kGetArrayOwner:
-        if (CGNode *BufferNode = ConGraph->getNode(ASC.getSelf(), this)) {
-          ConGraph->defer(ConGraph->getNode(ASC.getCallResult(), this),
-                          BufferNode);
-        }
-        return;
       case ArrayCallKind::kGetElement:
         if (CGNode *AddrNode = ConGraph->getNode(ASC.getSelf(), this)) {
           CGNode *DestNode = nullptr;
@@ -1398,8 +1395,7 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
     case SILInstructionKind::Name##ReleaseInst:
 #include "swift/AST/ReferenceStorage.def"
     case SILInstructionKind::StrongReleaseInst:
-    case SILInstructionKind::ReleaseValueInst:
-    case SILInstructionKind::StrongUnpinInst: {
+    case SILInstructionKind::ReleaseValueInst: {
       SILValue OpV = I->getOperand(0);
       if (CGNode *AddrNode = ConGraph->getNode(OpV, this)) {
         // A release instruction may deallocate the pointer operand. This may
@@ -1557,7 +1553,6 @@ void EscapeAnalysis::analyzeInstruction(SILInstruction *I,
     case SILInstructionKind::BridgeObjectToRefInst:
     case SILInstructionKind::UncheckedAddrCastInst:
     case SILInstructionKind::UnconditionalCheckedCastInst:
-    case SILInstructionKind::StrongPinInst:
     // DO NOT use LOADABLE_REF_STORAGE because unchecked references don't have
     // retain/release instructions that trigger the 'default' case.
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
@@ -1620,7 +1615,8 @@ bool EscapeAnalysis::deinitIsKnownToNotCapture(SILValue V) {
     if (V->getType().is<SILBoxType>())
       return true;
 
-    if (isa<FunctionRefInst>(V))
+    if (isa<FunctionRefInst>(V) || isa<DynamicFunctionRefInst>(V) ||
+        isa<PreviousDynamicFunctionRefInst>(V))
       return true;
 
     // Check all operands of a partial_apply

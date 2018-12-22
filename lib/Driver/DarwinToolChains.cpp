@@ -16,12 +16,12 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/Platform.h"
 #include "swift/Basic/Range.h"
+#include "swift/Basic/STLExtras.h"
 #include "swift/Basic/TaskQueue.h"
 #include "swift/Config.h"
 #include "swift/Driver/Compilation.h"
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
-#include "swift/Frontend/Frontend.h"
 #include "swift/Option/Options.h"
 #include "clang/Basic/Version.h"
 #include "clang/Driver/Util.h"
@@ -359,6 +359,9 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
 
   if (context.OI.SelectedSanitizers & SanitizerKind::Thread)
     addLinkSanitizerLibArgsForDarwin(context.Args, Arguments, "tsan", *this);
+
+  if (context.OI.SelectedSanitizers & SanitizerKind::Undefined)
+    addLinkSanitizerLibArgsForDarwin(context.Args, Arguments, "ubsan", *this);
 
   // Only link in libFuzzer for executables.
   if (job.getKind() == LinkKind::Executable &&

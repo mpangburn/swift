@@ -376,6 +376,9 @@ LookupResult TypeChecker::lookupMember(DeclContext *dc,
   if (options.contains(NameLookupFlags::ProtocolMembers))
     subOptions |= NL_ProtocolMembers;
 
+  if (options.contains(NameLookupFlags::IncludeAttributeImplements))
+    subOptions |= NL_IncludeAttributeImplements;
+
   // We handle our own overriding/shadowing filtering.
   subOptions &= ~NL_RemoveOverridden;
   subOptions &= ~NL_RemoveNonVisible;
@@ -447,7 +450,7 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
   if (options.contains(NameLookupFlags::IgnoreAccessControl))
     subOptions |= NL_IgnoreAccessControl;
 
-  if (!dc->lookupQualified(type, name, subOptions, this, decls))
+  if (!dc->lookupQualified(type, name, subOptions, nullptr, decls))
     return result;
 
   // Look through the declarations, keeping only the unique type declarations.
@@ -457,9 +460,11 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
     auto *typeDecl = cast<TypeDecl>(decl);
 
     // FIXME: This should happen before we attempt shadowing checks.
-    validateDecl(typeDecl);
-    if (!typeDecl->hasInterfaceType()) // FIXME: recursion-breaking hack
-      continue;
+    if (!typeDecl->hasInterfaceType()) {
+      dc->getASTContext().getLazyResolver()->resolveDeclSignature(typeDecl);
+      if (!typeDecl->hasInterfaceType()) // FIXME: recursion-breaking hack
+        continue;
+    }
 
     auto memberType = typeDecl->getDeclaredInterfaceType();
 
@@ -548,7 +553,9 @@ LookupTypeResult TypeChecker::lookupMemberType(DeclContext *dc,
           ProtocolConformanceState::CheckingTypeWitnesses)
         continue;
 
-      auto typeDecl = concrete->getTypeWitnessAndDecl(assocType, this).second;
+      auto lazyResolver = dc->getASTContext().getLazyResolver();
+      auto typeDecl =
+        concrete->getTypeWitnessAndDecl(assocType, lazyResolver).second;
 
       assert(typeDecl && "Missing type witness?");
 
@@ -595,6 +602,12 @@ static unsigned getCallEditDistance(DeclName writtenName,
   StringRef writtenBase = writtenName.getBaseName().userFacingName();
   StringRef correctedBase = correctedName.getBaseName().userFacingName();
 
+  // Don't typo-correct to a name with a leading underscore unless the typed
+  // name also begins with an underscore.
+  if (correctedBase.startswith("_") && !writtenBase.startswith("_")) {
+    return UnreasonableCallEditDistance;
+  }
+
   unsigned distance = writtenBase.edit_distance(correctedBase, maxEditDistance);
 
   // Bound the distance to UnreasonableCallEditDistance.
@@ -624,15 +637,6 @@ static bool isPlausibleTypo(DeclRefKind refKind, DeclName typedName,
   return true;
 }
 
-static bool isLocInVarInit(TypeChecker &TC, VarDecl *var, SourceLoc loc) {
-  auto binding = var->getParentPatternBinding();
-  if (!binding || binding->isImplicit())
-    return false;
-
-  auto initRange = binding->getSourceRange();
-  return TC.Context.SourceMgr.rangeContainsTokenLoc(initRange, loc);
-}
-
 void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
                                         Type baseTypeOrNull,
                                         NameLookupOptions lookupOptions,
@@ -656,12 +660,6 @@ void TypeChecker::performTypoCorrection(DeclContext *DC, DeclRefKind refKind,
     // not a plausible typo.
     if (!isPlausibleTypo(refKind, corrections.WrittenName, decl))
       return;
-
-    // Don't suggest a variable within its own initializer.
-    if (auto var = dyn_cast<VarDecl>(decl)) {
-      if (isLocInVarInit(*this, var, corrections.Loc.getBaseNameLoc()))
-        return;
-    }
 
     auto candidateName = decl->getFullName();
 

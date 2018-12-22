@@ -18,6 +18,7 @@
 
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Initializer.h"
+#include "swift/AST/Module.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Parse/CodeCompletionCallbacks.h"
 #include "swift/Parse/SyntaxParsingContext.h"
@@ -30,7 +31,7 @@
 using namespace swift;
 using namespace swift::syntax;
 
-/// \brief Determine the kind of a default argument given a parsed
+/// Determine the kind of a default argument given a parsed
 /// expression that has not yet been type-checked.
 static DefaultArgumentKind getDefaultArgKind(Expr *init) {
   if (!init)
@@ -169,6 +170,23 @@ Parser::parseParameterClause(SourceLoc &leftParenLoc,
                                           SyntaxKind::FunctionParameterList);
     }
     rightParenLoc = consumeToken(tok::r_paren);
+
+    // Per SE-0155, enum elements may not have empty parameter lists.
+    if (paramContext == ParameterContextKind::EnumElement) {
+      decltype(diag::enum_element_empty_arglist) diagnostic;
+      if (Context.isSwiftVersionAtLeast(5)) {
+        diagnostic = diag::enum_element_empty_arglist;
+      } else {
+        diagnostic = diag::enum_element_empty_arglist_swift4;
+      }
+
+      diagnose(leftParenLoc, diagnostic)
+        .highlight({leftParenLoc, rightParenLoc});
+      diagnose(leftParenLoc, diag::enum_element_empty_arglist_delete)
+        .fixItRemoveChars(leftParenLoc, rightParenLoc);
+      diagnose(leftParenLoc, diag::enum_element_empty_arglist_add_void)
+        .fixItInsert(leftParenLoc, "Void");
+    }
     return ParserStatus();
   }
 
@@ -465,6 +483,14 @@ mapParsedParameters(Parser &parser,
                                                              parsingEnumElt);
       }
       param->getTypeLoc() = TypeLoc(type);
+
+      // If there is `@autoclosure` attribute associated with the type
+      // let's mark that in the declaration as well, because it
+      // belongs to both type flags and declaration.
+      if (auto *ATR = dyn_cast<AttributedTypeRepr>(type)) {
+        auto &attrs = ATR->getAttrs();
+        param->setAutoClosure(attrs.has(TypeAttrKind::TAK_autoclosure));
+      }
     } else if (paramContext != Parser::ParameterContextKind::Closure) {
       // Non-closure parameters require a type.
       if (!param->isInvalid())
@@ -584,14 +610,6 @@ mapParsedParameters(Parser &parser,
       DefaultArgumentKind kind = getDefaultArgKind(param.DefaultArg);
       result->setDefaultArgumentKind(kind);
       result->setDefaultValue(param.DefaultArg);
-      if (kind == DefaultArgumentKind::Normal) {
-        SourceRange defaultArgRange = param.DefaultArg->getSourceRange();
-        CharSourceRange charRange =
-            Lexer::getCharSourceRangeFromSourceRange(parser.SourceMgr,
-                                                     defaultArgRange);
-        StringRef defaultArgText = parser.SourceMgr.extractText(charRange);
-        result->setDefaultValueStringRepresentation(defaultArgText);
-      }
     }
 
     elements.push_back(result);
@@ -655,15 +673,9 @@ Parser::parseSingleParameterClause(ParameterContextKind paramContext,
 }
 
 /// Parse function arguments.
-///   func-arguments:
-///     curried-arguments | selector-arguments
-///   curried-arguments:
-///     parameter-clause+
-///   selector-arguments:
-///     '(' selector-element ')' (identifier '(' selector-element ')')+
-///   selector-element:
-///      identifier '(' pattern-atom (':' type)? ('=' expr)? ')'
 ///
+/// Emits a special diagnostic if there are multiple parameter lists,
+/// but otherwise is identical to parseSingleParameterClause().
 ParserStatus
 Parser::parseFunctionArguments(SmallVectorImpl<Identifier> &NamePieces,
                                ParameterList *&BodyParams,
@@ -677,40 +689,18 @@ Parser::parseFunctionArguments(SmallVectorImpl<Identifier> &NamePieces,
   status |= FirstParameterClause;
   BodyParams = FirstParameterClause.get();
 
-  SmallVector<ParameterList *, 2> AllParams;
-  AllParams.push_back(BodyParams);
+  bool MultipleParameterLists = false;
   while (Tok.is(tok::l_paren)) {
+    MultipleParameterLists = true;
     auto CurriedParameterClause
       = parseSingleParameterClause(ParameterContextKind::Curried);
     status |= CurriedParameterClause;
-    AllParams.push_back(CurriedParameterClause.get());
   }
 
   // If the decl uses currying syntax, complain that that syntax has gone away.
-  if (AllParams.size() > 1) {
-    SourceRange allPatternsRange(
-      BodyParams->getStartLoc(),
-      AllParams.back()->getEndLoc());
-    auto diag = diagnose(allPatternsRange.Start,
-                         diag::parameter_curry_syntax_removed);
-    diag.highlight(allPatternsRange);
-    bool seenArg = false;
-    for (unsigned i = 0; i < AllParams.size() - 1; i++) {
-      // Replace ")(" with ", ", so "(x: Int)(y: Int)" becomes
-      // "(x: Int, y: Int)". But just delete them if they're not actually
-      // separating any arguments, e.g. in "()(y: Int)".
-      StringRef replacement(", ");
-      auto *leftParamList = AllParams[i];
-      auto *rightParamList = AllParams[i + 1];
-      if (leftParamList->size() != 0)
-        seenArg = true;
-      if (!seenArg || rightParamList->size() == 0)
-        replacement = "";
-    
-      diag.fixItReplace(SourceRange(leftParamList->getEndLoc(),
-                                    rightParamList->getStartLoc()),
-                        replacement);
-    }
+  if (MultipleParameterLists) {
+    diagnose(BodyParams->getStartLoc(),
+             diag::parameter_curry_syntax_removed);
   }
 
   return status;
@@ -898,11 +888,27 @@ ParserResult<Pattern> Parser::parseTypedPattern() {
 ///
 ParserResult<Pattern> Parser::parsePattern() {
   SyntaxParsingContext PatternCtx(SyntaxContext, SyntaxContextKind::Pattern);
+  bool isLet = (InVarOrLetPattern != IVOLP_InVar);
+  auto specifier = isLet
+    ? VarDecl::Specifier::Let
+    : VarDecl::Specifier::Var;
   switch (Tok.getKind()) {
   case tok::l_paren:
     return parsePatternTuple();
     
   case tok::kw__:
+    // Normally, '_' is invalid in type context for patterns, but they show up
+    // in interface files as the name for type members that are non-public.
+    // Treat them as an implicitly synthesized NamedPattern with a nameless
+    // VarDecl inside.
+    if (CurDeclContext->isTypeContext() &&
+        SF.Kind == SourceFileKind::Interface) {
+      PatternCtx.setCreateSyntax(SyntaxKind::IdentifierPattern);
+      auto VD = new (Context) VarDecl(
+        /*IsStatic*/false, specifier, /*IsCaptureList*/false,
+        consumeToken(tok::kw__), Identifier(), CurDeclContext);
+      return makeParserResult(new (Context) NamedPattern(VD, /*implicit*/true));
+    }
     PatternCtx.setCreateSyntax(SyntaxKind::WildcardPattern);
     return makeParserResult(new (Context) AnyPattern(consumeToken(tok::kw__)));
     
@@ -910,10 +916,6 @@ ParserResult<Pattern> Parser::parsePattern() {
     PatternCtx.setCreateSyntax(SyntaxKind::IdentifierPattern);
     Identifier name;
     SourceLoc loc = consumeIdentifier(&name);
-    bool isLet = (InVarOrLetPattern != IVOLP_InVar);
-    auto specifier = isLet
-                   ? VarDecl::Specifier::Let
-                   : VarDecl::Specifier::Var;
     if (Tok.isIdentifierOrUnderscore() && !Tok.isContextualDeclKeyword())
       diagnoseConsecutiveIDs(name.str(), loc, isLet ? "constant" : "variable");
 
@@ -1016,6 +1018,9 @@ ParserResult<Pattern> Parser::parsePatternTuple() {
   SyntaxParsingContext TuplePatternCtxt(SyntaxContext,
                                         SyntaxKind::TuplePattern);
   StructureMarkerRAII ParsingPatternTuple(*this, Tok);
+  if (ParsingPatternTuple.isFailed()) {
+    return makeParserError();
+  }
   SourceLoc LPLoc = consumeToken(tok::l_paren);
   SourceLoc RPLoc;
 
@@ -1167,7 +1172,7 @@ ParserResult<Pattern> Parser::parseMatchingPatternAsLetOrVar(bool isLet,
   if (subPattern.isNull())
     return nullptr;
   auto *varP = new (Context) VarPattern(varLoc, isLet, subPattern.get());
-  return makeParserResult(varP);
+  return makeParserResult(ParserStatus(subPattern), varP);
 }
 
 

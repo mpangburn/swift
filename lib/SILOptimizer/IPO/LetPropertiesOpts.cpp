@@ -109,8 +109,8 @@ public:
 
   SILBasicBlock *remapBasicBlock(SILBasicBlock *BB) { return BB; }
 
-  SILValue remapValue(SILValue Value) {
-    return SILCloner<InitSequenceCloner>::remapValue(Value);
+  SILValue getMappedValue(SILValue Value) {
+    return SILCloner<InitSequenceCloner>::getMappedValue(Value);
   }
 
   void postProcess(SILInstruction *orig, SILInstruction *cloned) {
@@ -125,7 +125,7 @@ public:
   SILValue clone() {
     for (auto I : Init.Instructions)
       process(I);
-    return remapValue(Init.Result);
+    return getMappedValue(Init.Result);
   }
 };
 
@@ -388,36 +388,43 @@ bool LetPropertiesOpt::isConstantLetProperty(VarDecl *Property) {
   return true;
 }
 
+static bool isProjectionOfProperty(SILValue addr, VarDecl *Property) {
+  if (auto *REA = dyn_cast<RefElementAddrInst>(addr)) {
+    return REA->getField() == Property;
+  }
+  if (auto *SEA = dyn_cast<StructElementAddrInst>(addr)) {
+    return SEA->getField() == Property;
+  }
+  return false;
+}
+
 // Analyze the init value being stored by the instruction into a property.
 bool
 LetPropertiesOpt::analyzeInitValue(SILInstruction *I, VarDecl *Property) {
-  SmallVector<SILInstruction *, 8> ReverseInsns;
   SILValue value;
   if (auto SI = dyn_cast<StructInst>(I)) {
     value = SI->getFieldValue(Property);
   } else if (auto SI = dyn_cast<StoreInst>(I)) {
     auto Dest = stripAddressAccess(SI->getDest());
 
-    assert(((isa<RefElementAddrInst>(Dest) &&
-             cast<RefElementAddrInst>(Dest)->getField() == Property) ||
-            (isa<StructElementAddrInst>(Dest) &&
-             cast<StructElementAddrInst>(Dest)->getField() == Property)) &&
-           "Store instruction should store into a proper let property");
+    assert(isProjectionOfProperty(stripAddressAccess(SI->getDest()), Property)
+           && "Store instruction should store into a proper let property");
     (void) Dest;
     value = SI->getSrc();
   }
 
-  // Bail if a value of a property is not a statically known constant init.
-  if (!analyzeStaticInitializer(value, ReverseInsns))
-    return false;
-
-  // Fill in the InitSequence by reversing the instructions and
-  // setting the result index.
-  InitSequence sequence;
-  while (!ReverseInsns.empty()) {
-    sequence.Instructions.push_back(ReverseInsns.pop_back_val());
+  // Check if it's just a copy from another instance of the struct.
+  if (auto *LI = dyn_cast<LoadInst>(value)) {
+    SILValue addr = LI->getOperand();
+    if (isProjectionOfProperty(addr, Property))
+      return true;
   }
+
+  // Bail if a value of a property is not a statically known constant init.
+  InitSequence sequence;
   sequence.Result = value;
+  if (!analyzeStaticInitializer(value, sequence.Instructions))
+    return false;
 
   auto &cachedSequence = InitMap[Property];
   if (cachedSequence.isValid() &&

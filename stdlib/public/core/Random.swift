@@ -61,27 +61,6 @@ public protocol RandomNumberGenerator {
   ///
   /// - Returns: An unsigned 64-bit random value.
   mutating func next() -> UInt64
-
-  // FIXME: De-underscore after swift-evolution amendment
-  mutating func _fill(bytes buffer: UnsafeMutableRawBufferPointer)
-}
-
-extension RandomNumberGenerator {
-  @inlinable
-  public mutating func _fill(bytes buffer: UnsafeMutableRawBufferPointer) {
-    // FIXME: Optimize
-    var chunk: UInt64 = 0
-    var chunkBytes = 0
-    for i in 0..<buffer.count {
-      if chunkBytes == 0 {
-        chunk = next()
-        chunkBytes = UInt64.bitWidth / 8
-      }
-      buffer[i] = UInt8(truncatingIfNeeded: chunk)
-      chunk >>= UInt8.bitWidth
-      chunkBytes -= 1
-    }
-  }
 }
 
 extension RandomNumberGenerator {
@@ -164,14 +143,7 @@ public struct SystemRandomNumberGenerator : RandomNumberGenerator {
   @inlinable
   public mutating func next() -> UInt64 {
     var random: UInt64 = 0
-    _stdlib_random(&random, MemoryLayout<UInt64>.size)
+    swift_stdlib_random(&random, MemoryLayout<UInt64>.size)
     return random
-  }
-
-  @inlinable
-  public mutating func _fill(bytes buffer: UnsafeMutableRawBufferPointer) {
-    if !buffer.isEmpty {
-      _stdlib_random(buffer.baseAddress!, buffer.count)
-    }
   }
 }

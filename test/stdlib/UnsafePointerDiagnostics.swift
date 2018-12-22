@@ -22,21 +22,21 @@ func unsafePointerConversionAvailability(
   let oups: UnsafePointer<String>? = ups
 
   _ = UnsafeMutableRawPointer(mrp)
-  _ = UnsafeMutableRawPointer(rp)   // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(rp)   // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(umpv)
-  _ = UnsafeMutableRawPointer(upv)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(upv)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(umpi)
-  _ = UnsafeMutableRawPointer(upi)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(upi)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(umps)
-  _ = UnsafeMutableRawPointer(ups)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(ups)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(omrp)
-  _ = UnsafeMutableRawPointer(orp)   // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(orp)   // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(oumpv)
-  _ = UnsafeMutableRawPointer(oupv)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(oupv)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(oumpi)
-  _ = UnsafeMutableRawPointer(oupi)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(oupi)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
   _ = UnsafeMutableRawPointer(oumps)
-  _ = UnsafeMutableRawPointer(oups)  // expected-error {{'init' has been renamed to 'init(mutating:)'}}
+  _ = UnsafeMutableRawPointer(oups)  // expected-error {{'init(_:)' has been renamed to 'init(mutating:)'}}
 
   // These all correctly pass with no error.
   _ = UnsafeRawPointer(mrp)
@@ -104,11 +104,11 @@ func unsafeRawBufferPointerConversions(
   _ = UnsafeRawBufferPointer(start: rp, count: 1)
   _ = UnsafeMutableRawBufferPointer(mrbp)
   _ = UnsafeRawBufferPointer(mrbp)
-  _ = UnsafeMutableRawBufferPointer(rbp) // expected-error {{cannot invoke initializer for type 'UnsafeMutableRawBufferPointer' with an argument list of type '(UnsafeRawBufferPointer)'}} expected-note {{overloads for 'UnsafeMutableRawBufferPointer' exist with these partially matching parameter lists: (UnsafeMutableRawBufferPointer), (UnsafeMutableBufferPointer<T>)}}
+  _ = UnsafeMutableRawBufferPointer(rbp) // expected-error {{cannot invoke initializer for type 'UnsafeMutableRawBufferPointer' with an argument list of type '(UnsafeRawBufferPointer)'}} expected-note {{overloads for 'UnsafeMutableRawBufferPointer' exist with these partially matching parameter lists: (UnsafeMutableBufferPointer<T>), (UnsafeMutableRawBufferPointer)}}
   _ = UnsafeRawBufferPointer(rbp)
   _ = UnsafeMutableRawBufferPointer(mbpi)
   _ = UnsafeRawBufferPointer(mbpi)
-  _ = UnsafeMutableRawBufferPointer(bpi) // expected-error {{cannot invoke initializer for type 'UnsafeMutableRawBufferPointer' with an argument list of type '(UnsafeBufferPointer<Int>)'}} expected-note {{overloads for 'UnsafeMutableRawBufferPointer' exist with these partially matching parameter lists: (UnsafeMutableRawBufferPointer), (UnsafeMutableBufferPointer<T>)}}
+  _ = UnsafeMutableRawBufferPointer(bpi) // expected-error {{cannot invoke initializer for type 'UnsafeMutableRawBufferPointer' with an argument list of type '(UnsafeBufferPointer<Int>)'}} expected-note {{overloads for 'UnsafeMutableRawBufferPointer' exist with these partially matching parameter lists: (UnsafeMutableBufferPointer<T>), (UnsafeMutableRawBufferPointer)}}
   _ = UnsafeRawBufferPointer(bpi)
   _ = UnsafeMutableRawBufferPointer(start: omrp, count: 1)
   _ = UnsafeRawBufferPointer(start: omrp, count: 1)

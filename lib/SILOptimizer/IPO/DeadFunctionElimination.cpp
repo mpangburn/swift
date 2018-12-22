@@ -40,14 +40,14 @@ protected:
   /// method.
   struct FuncImpl {
     FuncImpl(SILFunction *F, ClassDecl *Cl) : F(F), Impl(Cl) {}
-    FuncImpl(SILFunction *F, ProtocolConformance *C) : F(F), Impl(C) {}
+    FuncImpl(SILFunction *F, RootProtocolConformance *C) : F(F), Impl(C) {}
 
     /// The implementing function.
     SILFunction *F;
 
     /// This is a class decl if we are tracking a class_method (i.e. a vtable
     /// method) and a protocol conformance if we are tracking a witness_method.
-    PointerUnion<ClassDecl *, ProtocolConformance *> Impl;
+    PointerUnion<ClassDecl *, RootProtocolConformance*> Impl;
   };
 
   /// Stores which functions implement a vtable or witness table method.
@@ -75,7 +75,7 @@ protected:
     }
 
     /// Adds an implementation of the method in a specific conformance.
-    void addWitnessFunction(SILFunction *F, ProtocolConformance *Conf) {
+    void addWitnessFunction(SILFunction *F, RootProtocolConformance *Conf) {
       assert(isWitnessMethod);
       implementingFunctions.push_back(FuncImpl(F, Conf));
     }
@@ -317,7 +317,7 @@ protected:
       return;
     mi->methodIsCalled = true;
     for (FuncImpl &FImpl : mi->implementingFunctions) {
-      if (auto *Conf = FImpl.Impl.dyn_cast<ProtocolConformance *>()) {
+      if (auto Conf = FImpl.Impl.dyn_cast<RootProtocolConformance *>()) {
         SILWitnessTable *WT =
             Module->lookUpWitnessTable(Conf,
                                        /*deserializeLazily*/ false);
@@ -347,8 +347,8 @@ protected:
     for (SILBasicBlock &BB : *F) {
       for (SILInstruction &I : BB) {
         if (auto *WMI = dyn_cast<WitnessMethodInst>(&I)) {
-          auto *funcDecl = cast<AbstractFunctionDecl>(WMI->getMember().getDecl());
-          assert(funcDecl == getBase(funcDecl));
+          auto *funcDecl = getBase(
+              cast<AbstractFunctionDecl>(WMI->getMember().getDecl()));
           MethodInfo *mi = getMethodInfo(funcDecl, /*isWitnessTable*/ true);
           ensureAliveProtocolMethod(mi);
         } else if (auto *MI = dyn_cast<MethodInst>(&I)) {
@@ -361,6 +361,10 @@ protected:
           MethodInfo *mi = getMethodInfo(funcDecl, /*isWitnessTable*/ false);
           ensureAliveClassMethod(mi, dyn_cast<FuncDecl>(funcDecl), MethodCl);
         } else if (auto *FRI = dyn_cast<FunctionRefInst>(&I)) {
+          ensureAlive(FRI->getReferencedFunction());
+        } else if (auto *FRI = dyn_cast<DynamicFunctionRefInst>(&I)) {
+          ensureAlive(FRI->getReferencedFunction());
+        } else if (auto *FRI = dyn_cast<PreviousDynamicFunctionRefInst>(&I)) {
           ensureAlive(FRI->getReferencedFunction());
         } else if (auto *KPI = dyn_cast<KeyPathInst>(&I)) {
           for (auto &component : KPI->getPattern()->getComponents())
@@ -483,7 +487,7 @@ class DeadFunctionElimination : FunctionLivenessComputation {
 
     // Collect witness method implementations.
     for (SILWitnessTable &WT : Module->getWitnessTableList()) {
-      ProtocolConformance *Conf = WT.getConformance();
+      auto Conf = WT.getConformance();
       for (const SILWitnessTable::Entry &entry : WT.getEntries()) {
         if (entry.getKind() != SILWitnessTable::Method)
           continue;
@@ -504,11 +508,12 @@ class DeadFunctionElimination : FunctionLivenessComputation {
     // Collect default witness method implementations.
     for (SILDefaultWitnessTable &WT : Module->getDefaultWitnessTableList()) {
       for (const SILDefaultWitnessTable::Entry &entry : WT.getEntries()) {
-        if (!entry.isValid())
+        if (!entry.isValid() || entry.getKind() != SILWitnessTable::Method)
           continue;
 
-        SILFunction *F = entry.getWitness();
-        auto *fd = cast<AbstractFunctionDecl>(entry.getRequirement().getDecl());
+        SILFunction *F = entry. getMethodWitness().Witness;
+        auto *fd = cast<AbstractFunctionDecl>(
+                     entry.getMethodWitness().Requirement.getDecl());
         MethodInfo *mi = getMethodInfo(fd, /*isWitnessTable*/ true);
         mi->addWitnessFunction(F, nullptr);
       }
@@ -585,14 +590,15 @@ class DeadFunctionElimination : FunctionLivenessComputation {
         // The default witness table is visible from "outside". Therefore all
         // methods might be called and we mark all methods as alive.
         for (const SILDefaultWitnessTable::Entry &entry : WT.getEntries()) {
-          if (!entry.isValid())
+          if (!entry.isValid() || entry.getKind() != SILWitnessTable::Method)
             continue;
 
           auto *fd =
-              cast<AbstractFunctionDecl>(entry.getRequirement().getDecl());
+              cast<AbstractFunctionDecl>(
+                entry.getMethodWitness().Requirement.getDecl());
           assert(fd == getBase(fd) &&
                  "key in default witness table is overridden");
-          SILFunction *F = entry.getWitness();
+          SILFunction *F = entry.getMethodWitness().Witness;
           if (!F)
             continue;
 

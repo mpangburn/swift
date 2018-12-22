@@ -586,7 +586,7 @@ void Remangler::mangleSpecializationPassID(Node *node) {
   Out << node->getIndex();
 }
 
-void Remangler::mangleSpecializationIsFragile(Node *node) {
+void Remangler::mangleIsSerialized(Node *node) {
   Out << "q";
 }
 
@@ -680,6 +680,42 @@ void Remangler::mangleRetroactiveConformance(Node *node) {
   unreachable("Retroactive conformances aren't in the old mangling");
 }
 
+void Remangler::mangleProtocolConformanceRefInTypeModule(Node *node) {
+  unreachable("Protocol conformance references aren't in the old mangling");
+}
+
+void Remangler::mangleProtocolConformanceRefInProtocolModule(Node *node) {
+  unreachable("Protocol conformance references aren't in the old mangling");
+}
+
+void Remangler::mangleProtocolConformanceRefInOtherModule(Node *node) {
+  unreachable("Protocol conformance references aren't in the old mangling");
+}
+
+void Remangler::mangleConcreteProtocolConformance(Node *node) {
+  unreachable("Concrete conformances aren't in the old mangling");
+}
+
+void Remangler::mangleAnyProtocolConformanceList(Node *node) {
+  unreachable("Conformance lists aren't in the old mangling");
+}
+
+void Remangler::mangleDependentAssociatedConformance(Node *node) {
+  unreachable("Dependent associated conformances aren't in the old mangling");
+}
+
+void Remangler::mangleDependentProtocolConformanceRoot(Node *node) {
+  unreachable("Dependent conformances aren't in the old mangling");
+}
+
+void Remangler::mangleDependentProtocolConformanceInherited(Node *node) {
+  unreachable("Dependent conformances aren't in the old mangling");
+}
+
+void Remangler::mangleDependentProtocolConformanceAssociated(Node *node) {
+  unreachable("Dependent conformances aren't in the old mangling");
+}
+
 void Remangler::mangleProtocolConformance(Node *node) {
   // type, protocol name, context
   assert(node->getNumChildren() == 3);
@@ -728,7 +764,7 @@ void Remangler::mangleTypeMetadataInstantiationFunction(Node *node) {
   mangleSingleChildNode(node); // type
 }
 
-void Remangler::mangleTypeMetadataInPlaceInitializationCache(Node *node) {
+void Remangler::mangleTypeMetadataSingletonInitializationCache(Node *node) {
   Out << "Ml";
   mangleSingleChildNode(node); // type
 }
@@ -777,6 +813,10 @@ void Remangler::mangleProtocolDescriptor(Node *node) {
   mangleProtocolWithoutPrefix(node->begin()[0]);
 }
 
+void Remangler::mangleProtocolRequirementsBaseDescriptor(Node *node) {
+  Out << "<protocol-requirements-base-descriptor>";
+}
+
 void Remangler::mangleProtocolWitnessTablePattern(Node *node) {
   unreachable("todo");
 }
@@ -784,6 +824,11 @@ void Remangler::mangleProtocolWitnessTablePattern(Node *node) {
 void Remangler::mangleProtocolConformanceDescriptor(Node *node) {
   Out << "Mc";
   mangleProtocolConformance(node->begin()[0]);
+}
+
+void Remangler::mangleProtocolSelfConformanceDescriptor(Node *node) {
+  Out << "MS";
+  mangleProtocol(node->begin()[0]);
 }
 
 void Remangler::manglePartialApplyForwarder(Node *node) {
@@ -798,6 +843,18 @@ void Remangler::manglePartialApplyObjCForwarder(Node *node) {
 
 void Remangler::mangleMergedFunction(Node *node) {
   Out << "Tm";
+}
+
+void Remangler::mangleDynamicallyReplaceableFunctionImpl(Node *node) {
+  Out << "TI";
+}
+
+void Remangler::mangleDynamicallyReplaceableFunctionKey(Node *node) {
+  Out << "Tx";
+}
+
+void Remangler::mangleDynamicallyReplaceableFunctionVar(Node *node) {
+  Out << "TX";
 }
 
 void Remangler::mangleDirectness(Node *node) {
@@ -841,6 +898,11 @@ void Remangler::mangleEnumCase(Node *node) {
   mangleSingleChildNode(node); // enum case
 }
 
+void Remangler::mangleProtocolSelfConformanceWitnessTable(Node *node) {
+  Out << "WS";
+  mangleSingleChildNode(node); // protocol
+}
+
 void Remangler::mangleProtocolWitnessTable(Node *node) {
   Out << "WP";
   mangleSingleChildNode(node); // protocol conformance
@@ -876,17 +938,41 @@ void Remangler::mangleLazyProtocolWitnessTableCacheVariable(Node *node) {
   mangleChildNodes(node); // type, protocol conformance
 }
 
+void Remangler::mangleAssociatedTypeDescriptor(Node *node) {
+  Out << "<associated-type-descriptor>";
+}
+
+void Remangler::mangleAssociatedConformanceDescriptor(Node *node) {
+  Out << "<associated-conformance-descriptor>";
+}
+
+void Remangler::mangleDefaultAssociatedConformanceAccessor(Node *node) {
+  Out << "<default-associated-conformance-descriptor>";
+}
+
+void Remangler::mangleBaseConformanceDescriptor(Node *node) {
+  Out << "<base-conformance-descriptor>";
+}
+
 void Remangler::mangleAssociatedTypeMetadataAccessor(Node *node) {
   Out << "Wt";
   mangleChildNodes(node); // protocol conformance, identifier
+}
+
+void Remangler::mangleDefaultAssociatedTypeMetadataAccessor(Node *node) {
+  Out << "<default-associated-type-metadata-accessor>";
 }
 
 void Remangler::mangleAssociatedTypeWitnessTableAccessor(Node *node) {
   Out << "WT";
   assert(node->getNumChildren() == 3);
   mangleChildNode(node, 0); // protocol conformance
-  mangleChildNode(node, 1); // identifier
+  mangleChildNode(node, 1); // type
   mangleProtocolWithoutPrefix(node->begin()[2]); // type
+}
+
+void Remangler::mangleBaseWitnessTableAccessor(Node *node) {
+  Out << "<base-witness-table-accessor>";
 }
 
 void Remangler::mangleReabstractionThunkHelper(Node *node) {
@@ -899,6 +985,11 @@ void Remangler::mangleReabstractionThunk(Node *node) {
   Out << "Tr";
   if (node->getNumChildren() == 3) Out << 'G';
   mangleChildNodes(node); // generic signature?, type, type
+}
+
+void Remangler::mangleProtocolSelfConformanceWitness(Node *node) {
+  Out << "TS";
+  mangleSingleChildNode(node); // entity
 }
 
 void Remangler::mangleProtocolWitness(Node *node) {
@@ -1145,6 +1236,20 @@ void Remangler::mangleNamedAndTypedEntity(Node *node, char basicKind,
 void Remangler::mangleEntityContext(Node *node, EntityContext &ctx) {
   // Remember that we're mangling a context.
   EntityContext::ManglingContextRAII raii(ctx);
+
+  // Deal with bound generic types.
+  switch (node->getKind()) {
+    case Node::Kind::BoundGenericStructure:
+    case Node::Kind::BoundGenericEnum:
+    case Node::Kind::BoundGenericClass:
+    case Node::Kind::BoundGenericOtherNominalType:
+    case Node::Kind::BoundGenericTypeAlias:
+      mangleAnyNominalType(node, ctx);
+      return;
+
+    default:
+      break;
+  }
 
   switch (node->getKind()) {
 #define NODE(ID)                                \
@@ -1656,6 +1761,7 @@ void Remangler::mangleExtension(Node *node, EntityContext &ctx) {
   if (node->getNumChildren() == 3) {
     mangleDependentGenericSignature(node->begin()[2]); // generic sig
   }
+
   mangleEntityContext(node->begin()[1], ctx); // context
 }
 
@@ -1804,6 +1910,11 @@ void Remangler::mangleGenericArgs(Node *node, EntityContext &ctx) {
     break;
   }
 
+  case Node::Kind::Extension: {
+    mangleGenericArgs(node->getChild(1), ctx);
+    break;
+  }
+
   default:
     break;
   }
@@ -1899,6 +2010,12 @@ void Remangler::mangleBoundGenericTypeAlias(Node *node) {
   mangleAnyNominalType(node, ctx);
 }
 
+void Remangler::mangleBoundGenericFunction(Node *node) {
+  EntityContext ctx;
+  // Not really a nominal type, but it works for functions, too.
+  mangleAnyNominalType(node, ctx);
+}
+
 void Remangler::mangleTypeList(Node *node) {
   mangleChildNodes(node); // all types
   Out << '_';
@@ -1931,12 +2048,24 @@ void Remangler::mangleGenericTypeParamDecl(Node *node) {
   unreachable("todo");
 }
 
-void Remangler::mangleCurryThunk(Node *node, EntityContext &ctx) {
+void Remangler::mangleCurryThunk(Node *node) {
   Out << "<curry-thunk>";
 }
 
-void Remangler::mangleDispatchThunk(Node *node, EntityContext &ctx) {
+void Remangler::mangleDispatchThunk(Node *node) {
   Out << "<dispatch-thunk>";
+}
+
+void Remangler::mangleMethodDescriptor(Node *node) {
+  Out << "<method-descriptor>";
+}
+
+void Remangler::mangleMethodLookupFunction(Node *node) {
+  Out << "<method-lookup-function>";
+}
+
+void Remangler::mangleObjCMetadataUpdateFunction(Node *node) {
+  Out << "<objc-metadata-update-function>";
 }
 
 void Remangler::mangleEmptyList(Node *node) {
@@ -2122,11 +2251,11 @@ void Remangler::mangleAssociatedTypeGenericParamRef(Node *node) {
   unreachable("unsupported");
 }
 
-void Remangler::mangleUnresolvedSymbolicReference(Node *node, EntityContext&) {
+void Remangler::mangleTypeSymbolicReference(Node *node, EntityContext&) {
   unreachable("unsupported");
 }
 
-void Remangler::mangleSymbolicReference(Node *node, EntityContext&) {
+void Remangler::mangleProtocolSymbolicReference(Node *node, EntityContext&) {
   unreachable("unsupported");
 }
 

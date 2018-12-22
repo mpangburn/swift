@@ -59,7 +59,7 @@ public:
   /// Arguments which should be passed in immediate mode.
   std::vector<std::string> ImmediateArgv;
 
-  /// \brief A list of arguments to forward to LLVM's option processing; this
+  /// A list of arguments to forward to LLVM's option processing; this
   /// should only be used for debugging and experimental features.
   std::vector<std::string> LLVMArgs;
 
@@ -71,10 +71,6 @@ public:
 
   /// The path to which we should store indexing data, if any.
   std::string IndexStorePath;
-
-  /// The path to which we should emit GraphViz output for the complete
-  /// request-evaluator graph.
-  std::string RequestEvaluatorGraphVizPath;
 
   /// Emit index data for imported serialized swift system modules.
   bool IndexSystemModules = false;
@@ -130,6 +126,9 @@ public:
     EmitModuleOnly, ///< Emit module only
     MergeModules,   ///< Merge modules only
 
+    /// Build from a swiftinterface, as close to `import` as possible
+    BuildModuleFromParseableInterface,
+
     EmitSIBGen, ///< Emit serialized AST + raw SIL
     EmitSIB,    ///< Emit serialized AST + canonical SIL
 
@@ -150,9 +149,10 @@ public:
   /// Indicates that the input(s) should be parsed as the Swift stdlib.
   bool ParseStdlib = false;
 
-  /// If set, emitted module files will always contain options for the
-  /// debugger to use.
-  bool AlwaysSerializeDebuggingOptions = false;
+  /// When true, emitted module files will always contain options for the
+  /// debugger to use. When unset, the options will only be present if the
+  /// module appears to not be a public module.
+  Optional<bool> SerializeOptionsForDebugging;
 
   /// If set, inserts instrumentation useful for testing the debugger.
   bool DebuggerTestingTransform = false;
@@ -196,6 +196,17 @@ public:
   /// \see ModuleDecl::isTestingEnabled
   bool EnableTesting = false;
 
+  /// Indicates whether we are compiling for private imports.
+  ///
+  /// \see ModuleDecl::arePrivateImportsEnabled
+  bool EnablePrivateImports = false;
+
+
+  /// Indicates whether we add implicit dynamic.
+  ///
+  /// \see ModuleDecl::isImplicitDynamicEnabled
+  bool EnableImplicitDynamic = false;
+
   /// Enables the "fully resilient" resilience strategy.
   ///
   /// \see ResilienceStrategy::Resilient
@@ -204,6 +215,9 @@ public:
   /// Indicates that the frontend should emit "verbose" SIL
   /// (if asked to emit SIL).
   bool EmitVerboseSIL = false;
+
+  /// If set, find and import parseable modules from .swiftinterface files.
+  bool EnableParseableModuleInterface = false;
 
   /// If set, this module is part of a mixed Objective-C/Swift framework, and
   /// the Objective-C half should implicitly be visible to the Swift sources.

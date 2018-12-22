@@ -113,19 +113,19 @@ public:
   /// Path prefixes that should be rewritten in debug info.
   PathRemapper DebugPrefixMap;
 
-  /// \brief Whether we're generating IR for the JIT.
+  /// Whether we're generating IR for the JIT.
   unsigned UseJIT : 1;
   
-  /// \brief Whether we're generating code for the integrated REPL.
+  /// Whether we're generating code for the integrated REPL.
   unsigned IntegratedREPL : 1;
   
-  /// \brief Whether we should run LLVM optimizations after IRGen.
+  /// Whether we should run LLVM optimizations after IRGen.
   unsigned DisableLLVMOptzns : 1;
 
   /// Whether we should run swift specific LLVM optimizations after IRGen.
   unsigned DisableSwiftSpecificLLVMOptzns : 1;
 
-  /// \brief Whether we should run LLVM SLP vectorizer.
+  /// Whether we should run LLVM SLP vectorizer.
   unsigned DisableLLVMSLPVectorizer : 1;
 
   /// Disable frame pointer elimination?
@@ -171,6 +171,13 @@ public:
   /// Bypass resilience when accessing resilient frameworks.
   unsigned EnableResilienceBypass : 1;
 
+  /// Force lazy initialization of class metadata
+  /// Used on Windows to avoid cross-module references.
+  unsigned LazyInitializeClassMetadata : 1;
+
+  /// The path to load legacy type layouts from.
+  StringRef ReadTypeInfoPath;
+
   /// Should we try to build incrementally by not emitting an object file if it
   /// has the same IR hash as the module that we are preparing to emit?
   ///
@@ -183,6 +190,9 @@ public:
 
   /// Instrument code to generate profiling information.
   unsigned GenerateProfile : 1;
+
+  /// Enable chaining of dynamic replacements.
+  unsigned EnableDynamicReplacementChaining : 1;
 
   /// Path to the profdata file to be used for PGO, or the empty string.
   std::string UseProfile = "";
@@ -215,9 +225,10 @@ public:
         EmbedMode(IRGenEmbedMode::None), HasValueNamesSetting(false),
         ValueNames(false), EnableReflectionMetadata(true),
         EnableReflectionNames(true), EnableClassResilience(false),
-        EnableResilienceBypass(false), UseIncrementalLLVMCodeGen(true),
-        UseSwiftCall(false), GenerateProfile(false), CmdArgs(),
-        SanitizeCoverage(llvm::SanitizerCoverageOptions()),
+        EnableResilienceBypass(false), LazyInitializeClassMetadata(false),
+        UseIncrementalLLVMCodeGen(true), UseSwiftCall(false),
+        GenerateProfile(false), EnableDynamicReplacementChaining(false),
+        CmdArgs(), SanitizeCoverage(llvm::SanitizerCoverageOptions()),
         TypeInfoFilter(TypeInfoDumpFilter::All) {}
 
   // Get a hash of all options which influence the llvm compilation but are not

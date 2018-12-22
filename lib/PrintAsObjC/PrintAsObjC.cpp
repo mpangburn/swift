@@ -65,8 +65,8 @@ static bool isAnyObjectOrAny(Type type) {
 
 /// Returns true if \p name matches a keyword in any Clang language mode.
 static bool isClangKeyword(Identifier name) {
-  static const llvm::StringSet<> keywords = []{
-    llvm::StringSet<> set;
+  static const llvm::DenseSet<StringRef> keywords = []{
+    llvm::DenseSet<StringRef> set;
     // FIXME: clang::IdentifierInfo /nearly/ has the API we need to do this
     // in a more principled way, but not quite.
 #define KEYWORD(SPELLING, FLAGS) \
@@ -137,7 +137,7 @@ namespace {
 using DelayedMemberSet = llvm::SmallSetVector<const ValueDecl *, 32>;
 
 class ObjCPrinter : private DeclVisitor<ObjCPrinter>,
-                    private TypeVisitor<ObjCPrinter, void, 
+                    private TypeVisitor<ObjCPrinter, void,
                                         Optional<OptionalTypeKind>>
 {
   friend ASTVisitor;
@@ -528,7 +528,7 @@ private:
     return sel.getNumArgs() == 0 &&
            sel.getSelectorPieces().front().str() == "init";
   }
-                                          
+  
   void printAbstractFunctionAsMethod(AbstractFunctionDecl *AFD,
                                      bool isClassMethod,
                                      bool isNSUIntegerSubscript = false) {
@@ -553,7 +553,7 @@ private:
     auto resultTy = getForeignResultType(AFD, methodTy, errorConvention);
 
     // Constructors and methods returning DynamicSelf return
-    // instancetype.    
+    // instancetype.
     if (isa<ConstructorDecl>(AFD) ||
         (isa<FuncDecl>(AFD) && cast<FuncDecl>(AFD)->hasDynamicSelf())) {
       if (errorConvention && errorConvention->stripsResultOptionality()) {
@@ -776,9 +776,8 @@ private:
   };
 
   /// Returns \c true if anything was printed.
-  bool printAvailability(
-      const Decl *D,
-      PrintLeadingSpace printLeadingSpace = PrintLeadingSpace::Yes) {
+  bool printAvailability(const Decl *D, PrintLeadingSpace printLeadingSpace =
+                                            PrintLeadingSpace::Yes) {
     bool hasPrintedAnything = false;
     auto maybePrintLeadingSpace = [&] {
       if (printLeadingSpace == PrintLeadingSpace::Yes || hasPrintedAnything)
@@ -788,7 +787,8 @@ private:
 
     for (auto AvAttr : D->getAttrs().getAttributes<AvailableAttr>()) {
       if (AvAttr->Platform == PlatformKind::none) {
-        if (AvAttr->PlatformAgnostic == PlatformAgnosticAvailabilityKind::Unavailable) {
+        if (AvAttr->PlatformAgnostic ==
+            PlatformAgnosticAvailabilityKind::Unavailable) {
           // Availability for *
           if (!AvAttr->Rename.empty() && isa<ValueDecl>(D)) {
             // rename
@@ -833,11 +833,10 @@ private:
       }
 
       // Availability for a specific platform
-      if (!AvAttr->Introduced.hasValue()
-          && !AvAttr->Deprecated.hasValue()
-          && !AvAttr->Obsoleted.hasValue()
-          && !AvAttr->isUnconditionallyDeprecated()
-          && !AvAttr->isUnconditionallyUnavailable()) {
+      if (!AvAttr->Introduced.hasValue() && !AvAttr->Deprecated.hasValue() &&
+          !AvAttr->Obsoleted.hasValue() &&
+          !AvAttr->isUnconditionallyDeprecated() &&
+          !AvAttr->isUnconditionallyUnavailable()) {
         continue;
       }
 
@@ -912,43 +911,75 @@ private:
     }
     return hasPrintedAnything;
   }
-    
-  void printRenameForDecl(const AvailableAttr *AvAttr, const ValueDecl *D,
-                          bool includeQuotes) {
-    assert(!AvAttr->Rename.empty());
-    
-    auto renamedParsedDeclName = parseDeclName(AvAttr->Rename);
-    auto renamedDeclName = renamedParsedDeclName.formDeclName(D->getASTContext());
-    
+
+  const ValueDecl *getRenameDecl(const ValueDecl *D,
+                                 const ParsedDeclName renamedParsedDeclName) {
     auto declContext = D->getDeclContext();
-    const ValueDecl *renamedDecl = nullptr;
-    
+    ASTContext &astContext = D->getASTContext();
+    auto renamedDeclName = renamedParsedDeclName.formDeclName(astContext);
+
     if (isa<ClassDecl>(D) || isa<ProtocolDecl>(D)) {
+      if (!renamedParsedDeclName.ContextName.empty()) {
+        return nullptr;
+      }
       UnqualifiedLookup lookup(renamedDeclName.getBaseIdentifier(),
-                               declContext->getModuleScopeContext(),
-                               nullptr,
+                               declContext->getModuleScopeContext(), nullptr,
                                SourceLoc(),
                                UnqualifiedLookup::Flags::TypeLookup);
-      renamedDecl = lookup.getSingleTypeResult();
+      return lookup.getSingleTypeResult();
+    }
+
+    TypeDecl *typeDecl = declContext->getSelfNominalTypeDecl();
+
+    const ValueDecl *renamedDecl = nullptr;
+    SmallVector<ValueDecl *, 4> lookupResults;
+    declContext->lookupQualified(typeDecl->getDeclaredInterfaceType(),
+                                 renamedDeclName, NL_QualifiedDefault, nullptr,
+                                 lookupResults);
+
+    if (lookupResults.size() == 1) {
+      auto candidate = lookupResults[0];
+      if (!shouldInclude(candidate))
+        return nullptr;
+      if (candidate->getKind() != D->getKind() ||
+          (candidate->isInstanceMember() !=
+           cast<ValueDecl>(D)->isInstanceMember()))
+        return nullptr;
+
+      renamedDecl = candidate;
     } else {
-      SmallVector<ValueDecl *, 4> lookupResults;
-      declContext->lookupQualified(
-        declContext->getSelfNominalTypeDecl(),
-        renamedDeclName, NL_QualifiedDefault, lookupResults);
       for (auto candidate : lookupResults) {
         if (!shouldInclude(candidate))
           continue;
-        
+
         if (candidate->getKind() != D->getKind() ||
             (candidate->isInstanceMember() !=
              cast<ValueDecl>(D)->isInstanceMember()))
           continue;
-        
-        if (isa<FuncDecl>(candidate) &&
-            (cast<FuncDecl>(candidate)->getParameters()->size() !=
-             cast<FuncDecl>(D)->getParameters()->size()))
-          continue;
-        
+
+        if (isa<AbstractFunctionDecl>(candidate)) {
+          auto cParams = cast<AbstractFunctionDecl>(candidate)->getParameters();
+          auto dParams = cast<AbstractFunctionDecl>(D)->getParameters();
+
+          if (cParams->size() != dParams->size())
+            continue;
+
+          bool hasSameParameterTypes = true;
+          for (auto index : indices(*cParams)) {
+            auto cParamsType = cParams->get(index)->getType();
+            auto dParamsType = dParams->get(index)->getType();
+            if (!cParamsType->matchesParameter(dParamsType,
+                                               TypeMatchOptions())) {
+              hasSameParameterTypes = false;
+              break;
+            }
+          }
+
+          if (!hasSameParameterTypes) {
+            continue;
+          }
+        }
+
         if (renamedDecl) {
           // If we found a duplicated candidate then we would silently fail.
           renamedDecl = nullptr;
@@ -957,11 +988,20 @@ private:
         renamedDecl = candidate;
       }
     }
-    
+    return renamedDecl;
+  }
+
+  void printRenameForDecl(const AvailableAttr *AvAttr, const ValueDecl *D,
+                          bool includeQuotes) {
+    assert(!AvAttr->Rename.empty());
+
+    const ValueDecl *renamedDecl =
+        getRenameDecl(D, parseDeclName(AvAttr->Rename));
+
     if (renamedDecl) {
       SmallString<128> scratch;
-      auto renamedObjCRuntimeName = renamedDecl->getObjCRuntimeName()
-        ->getString(scratch);
+      auto renamedObjCRuntimeName =
+          renamedDecl->getObjCRuntimeName()->getString(scratch);
       printEncodedString(renamedObjCRuntimeName, includeQuotes);
     } else {
       printEncodedString(AvAttr->Rename, includeQuotes);
@@ -1027,17 +1067,40 @@ private:
     return true;
   }
 
+  /// Returns whether \p ty is the C type \c CFTypeRef, or some typealias
+  /// thereof.
   bool isCFTypeRef(Type ty) {
-    if (ID_CFTypeRef.empty())
-      ID_CFTypeRef = M.getASTContext().getIdentifier("CFTypeRef");
-
     const TypeAliasDecl *TAD = nullptr;
     while (auto aliasTy = dyn_cast<NameAliasType>(ty.getPointer())) {
       TAD = aliasTy->getDecl();
       ty = aliasTy->getSinglyDesugaredType();
     }
 
-    return TAD && TAD->getName() == ID_CFTypeRef && TAD->hasClangNode();
+    if (!TAD || !TAD->hasClangNode())
+      return false;
+
+    if (ID_CFTypeRef.empty())
+      ID_CFTypeRef = M.getASTContext().getIdentifier("CFTypeRef");
+    return TAD->getName() == ID_CFTypeRef;
+  }
+
+  /// Returns true if \p ty can be used with Objective-C reference-counting
+  /// annotations like \c strong and \c weak.
+  bool isObjCReferenceCountableObjectType(Type ty) {
+    if (auto classDecl = ty->getClassOrBoundGenericClass()) {
+      switch (classDecl->getForeignClassKind()) {
+      case ClassDecl::ForeignKind::Normal:
+      case ClassDecl::ForeignKind::RuntimeOnly:
+        return true;
+      case ClassDecl::ForeignKind::CFType:
+        return false;
+      }
+    }
+
+    if (ty->isObjCExistentialType() && !isCFTypeRef(ty))
+      return true;
+
+    return false;
   }
 
   void visitVarDecl(VarDecl *VD) {
@@ -1065,22 +1128,27 @@ private:
       os << ", readonly";
 
     // Print the ownership semantics, if relevant.
-    // We treat "unowned" as "assign" (even though it's more like
-    // "safe_unretained") because we want people to think twice about
-    // allowing that object to disappear.
     Type ty = VD->getInterfaceType();
-    if (auto weakTy = ty->getAs<WeakStorageType>()) {
-      auto innerTy = weakTy->getReferentType()->getOptionalObjectType();
-      auto innerClass = innerTy->getClassOrBoundGenericClass();
-      if ((innerClass &&
-           innerClass->getForeignClassKind()!=ClassDecl::ForeignKind::CFType) ||
-          (innerTy->isObjCExistentialType() && !isCFTypeRef(innerTy))) {
-        os << ", weak";
+    if (auto referenceStorageTy = ty->getAs<ReferenceStorageType>()) {
+      switch (referenceStorageTy->getOwnership()) {
+      case ReferenceOwnership::Strong:
+        llvm_unreachable("not represented with a ReferenceStorageType");
+      case ReferenceOwnership::Weak: {
+        auto innerTy =
+            referenceStorageTy->getReferentType()->getOptionalObjectType();
+        if (isObjCReferenceCountableObjectType(innerTy))
+          os << ", weak";
+        break;
       }
-    } else if (ty->is<UnownedStorageType>()) {
-      os << ", assign";
-    } else if (ty->is<UnmanagedStorageType>()) {
-      os << ", unsafe_unretained";
+      case ReferenceOwnership::Unowned:
+      case ReferenceOwnership::Unmanaged:
+        // We treat "unowned" as "unsafe_unretained" (even though it's more
+        // like "safe_unretained") because we want people to think twice about
+        // allowing that object to disappear. "unowned(unsafe)" (and
+        // Swift.Unmanaged, handled below) really are "unsafe_unretained".
+        os << ", unsafe_unretained";
+        break;
+      }
     } else {
       Type copyTy = ty;
       bool isOptional = false;
@@ -1117,10 +1185,7 @@ private:
         case FunctionTypeRepresentation::CFunctionPointer:
           break;
         }
-      } else if ((nominal && isa<ClassDecl>(nominal) &&
-                  cast<ClassDecl>(nominal)->getForeignClassKind() !=
-                    ClassDecl::ForeignKind::CFType) ||
-                 (copyTy->isObjCExistentialType() && !isCFTypeRef(copyTy))) {
+      } else if (isObjCReferenceCountableObjectType(copyTy)) {
         os << ", strong";
       }
     }
@@ -1451,9 +1516,9 @@ private:
       MAP(UnsafeMutableRawPointer, "void *", true);
 
       Identifier ID_ObjectiveC = ctx.Id_ObjectiveC;
-      specialNames[{ID_ObjectiveC, ctx.getIdentifier("ObjCBool")}] 
+      specialNames[{ID_ObjectiveC, ctx.getIdentifier("ObjCBool")}]
         = { "BOOL", false};
-      specialNames[{ID_ObjectiveC, ctx.getIdentifier("Selector")}] 
+      specialNames[{ID_ObjectiveC, ctx.getIdentifier("Selector")}]
         = { "SEL", true };
       specialNames[{ID_ObjectiveC,
                     ctx.getIdentifier(
@@ -1523,12 +1588,8 @@ private:
 
   bool printImportedAlias(const TypeAliasDecl *alias,
                           Optional<OptionalTypeKind> optionalKind) {
-    if (!alias->hasClangNode()) {
-      if (!alias->isObjC()) return false;
-
-      os << alias->getName();
-      return true;
-    }
+    if (!alias->hasClangNode())
+      return false;
 
     if (auto *clangTypeDecl =
           dyn_cast<clang::TypeDecl>(alias->getClangDecl())) {
@@ -1560,7 +1621,7 @@ private:
     if (printImportedAlias(alias, optionalKind))
       return;
 
-    visitPart(alias->getUnderlyingTypeLoc().getType(), optionalKind);
+    visitPart(aliasTy->getSinglyDesugaredType(), optionalKind);
   }
 
   void maybePrintTagKeyword(const TypeDecl *NTD) {
@@ -1584,7 +1645,7 @@ private:
     os << clangDecl->getKindName() << " ";
   }
 
-  void visitStructType(StructType *ST, 
+  void visitStructType(StructType *ST,
                        Optional<OptionalTypeKind> optionalKind) {
     const StructDecl *SD = ST->getStructOrBoundGenericStruct();
 
@@ -1808,7 +1869,7 @@ private:
     visitExistentialType(PT, optionalKind, /*isMetatype=*/false);
   }
 
-  void visitProtocolCompositionType(ProtocolCompositionType *PCT, 
+  void visitProtocolCompositionType(ProtocolCompositionType *PCT,
                                     Optional<OptionalTypeKind> optionalKind) {
     visitExistentialType(PCT, optionalKind, /*isMetatype=*/false);
   }
@@ -1819,7 +1880,7 @@ private:
     visitExistentialType(instanceTy, optionalKind, /*isMetatype=*/true);
   }
 
-  void visitMetatypeType(MetatypeType *MT, 
+  void visitMetatypeType(MetatypeType *MT,
                          Optional<OptionalTypeKind> optionalKind) {
     Type instanceTy = MT->getInstanceType();
     if (auto classTy = instanceTy->getAs<ClassType>()) {
@@ -1854,7 +1915,7 @@ private:
     os << cast<clang::ObjCTypeParamDecl>(decl->getClangDecl())->getName();
     printNullability(optionalKind);
   }
-                      
+    
   void printFunctionType(FunctionType *FT, char pointerSigil,
                          Optional<OptionalTypeKind> optionalKind) {
     visitPart(FT->getResult(), OTK_None);
@@ -1863,7 +1924,7 @@ private:
     openFunctionTypes.push_back(FT);
   }
 
-  void visitFunctionType(FunctionType *FT, 
+  void visitFunctionType(FunctionType *FT,
                          Optional<OptionalTypeKind> optionalKind) {
     switch (FT->getRepresentation()) {
     case AnyFunctionType::Representation::Thin:
@@ -1888,7 +1949,7 @@ private:
     if (!FT->getParams().empty()) {
       interleave(FT->getParams(),
                  [this](const AnyFunctionType::Param &param) {
-                   print(param.getType(), OTK_None, param.getLabel(),
+                   print(param.getOldType(), OTK_None, param.getLabel(),
                          IsFunctionParam);
                  },
                  [this] { os << ", "; });
@@ -1907,18 +1968,18 @@ private:
     visitPart(PT->getSinglyDesugaredType(), optionalKind);
   }
 
-  void visitSyntaxSugarType(SyntaxSugarType *SST, 
+  void visitSyntaxSugarType(SyntaxSugarType *SST,
                             Optional<OptionalTypeKind> optionalKind) {
     visitPart(SST->getSinglyDesugaredType(), optionalKind);
   }
 
-  void visitDynamicSelfType(DynamicSelfType *DST, 
+  void visitDynamicSelfType(DynamicSelfType *DST,
                             Optional<OptionalTypeKind> optionalKind) {
     printNullability(optionalKind, NullabilityPrintKind::ContextSensitive);
     os << "instancetype";
   }
 
-  void visitReferenceStorageType(ReferenceStorageType *RST, 
+  void visitReferenceStorageType(ReferenceStorageType *RST,
                                  Optional<OptionalTypeKind> optionalKind) {
     visitPart(RST->getReferentType(), optionalKind);
   }
@@ -1956,7 +2017,7 @@ private:
   /// finishFunctionType()). If only a part of a type is being printed, use
   /// visitPart().
 public:
-  void print(Type ty, Optional<OptionalTypeKind> optionalKind, 
+  void print(Type ty, Optional<OptionalTypeKind> optionalKind,
              Identifier name = Identifier(),
              IsFunctionParam_t isFuncParam = IsNotFunctionParam) {
     PrettyStackTraceType trace(M.getASTContext(), "printing", ty);
@@ -1993,7 +2054,12 @@ class ReferencedTypeFinder : public TypeVisitor<ReferencedTypeFinder> {
   }
 
   void visitNameAliasType(NameAliasType *aliasTy) {
-    Callback(*this, aliasTy->getDecl());
+    if (aliasTy->getDecl()->hasClangNode() &&
+        !aliasTy->getDecl()->isCompatibilityAlias()) {
+      Callback(*this, aliasTy->getDecl());
+    } else {
+      visit(aliasTy->getSinglyDesugaredType());
+    }
   }
 
   void visitParenType(ParenType *parenTy) {
@@ -2037,7 +2103,7 @@ class ReferencedTypeFinder : public TypeVisitor<ReferencedTypeFinder> {
 
   void visitAnyFunctionType(AnyFunctionType *fnTy) {
     for (auto &param : fnTy->getParams())
-      visit(param.getType());
+      visit(param.getOldType());
     visit(fnTy->getResult());
   }
 
@@ -2312,9 +2378,8 @@ public:
         } else if (auto PD = dyn_cast<ProtocolDecl>(TD)) {
           forwardDeclare(PD);
         } else if (auto TAD = dyn_cast<TypeAliasDecl>(TD)) {
-          (void)addImport(TD);
-          // Just in case, make sure the underlying type is visible too.
-          finder.visit(TAD->getUnderlyingTypeLoc().getType());
+          if (TAD->hasClangNode())
+            (void)addImport(TD);
         } else if (addImport(TD)) {
           return;
         } else if (auto ED = dyn_cast<EnumDecl>(TD)) {
@@ -2656,15 +2721,6 @@ public:
     return import == importer->getImportedHeaderModule();
   }
 
-  static void getClangSubmoduleReversePath(SmallVectorImpl<StringRef> &path,
-                                           const clang::Module *module) {
-    // FIXME: This should be an API on clang::Module.
-    do {
-      path.push_back(module->Name);
-      module = module->Parent;
-    } while (module);
-  }
-
   static int compareImportModulesByName(const ImportModuleTy *left,
                                         const ImportModuleTy *right) {
     auto *leftSwiftModule = left->dyn_cast<ModuleDecl *>();
@@ -2694,10 +2750,10 @@ public:
     assert(rightClangModule->isSubModule() &&
            "top-level modules should use a normal swift::ModuleDecl");
 
-    SmallVector<StringRef, 8> leftReversePath;
-    SmallVector<StringRef, 8> rightReversePath;
-    getClangSubmoduleReversePath(leftReversePath, leftClangModule);
-    getClangSubmoduleReversePath(rightReversePath, rightClangModule);
+    SmallVector<StringRef, 8> leftReversePath(
+        ModuleDecl::ReverseFullNameIterator(leftClangModule), {});
+    SmallVector<StringRef, 8> rightReversePath(
+        ModuleDecl::ReverseFullNameIterator(rightClangModule), {});
 
     assert(leftReversePath != rightReversePath &&
            "distinct Clang modules should not have the same full name");
@@ -2712,6 +2768,10 @@ public:
 
   void writeImports(raw_ostream &out) {
     out << "#if __has_feature(modules)\n";
+
+    out << "#if __has_warning(\"-Watimport-in-framework-header\")\n"
+        << "#pragma clang diagnostic ignored \"-Watimport-in-framework-header\"\n"
+        << "#endif\n";
 
     // Sort alphabetically for determinism and consistency.
     SmallVector<ImportModuleTy, 8> sortedImports{imports.begin(),
@@ -2736,11 +2796,7 @@ public:
         assert(clangModule->isSubModule() &&
                "top-level modules should use a normal swift::ModuleDecl");
         out << "@import ";
-        SmallVector<StringRef, 8> submoduleNames;
-        getClangSubmoduleReversePath(submoduleNames, clangModule);
-        interleave(submoduleNames.rbegin(), submoduleNames.rend(),
-                   [&out](StringRef next) { out << next; },
-                   [&out] { out << "."; });
+        ModuleDecl::ReverseFullNameIterator(clangModule).printForward(out);
         out << ";\n";
       }
     }
@@ -2813,9 +2869,9 @@ public:
       // FIXME: This will end up taking linear time.
       auto lhsMembers = cast<ExtensionDecl>(*lhs)->getMembers();
       auto rhsMembers = cast<ExtensionDecl>(*rhs)->getMembers();
-      unsigned numLHSMembers = std::distance(lhsMembers.begin(), 
+      unsigned numLHSMembers = std::distance(lhsMembers.begin(),
                                              lhsMembers.end());
-      unsigned numRHSMembers = std::distance(rhsMembers.begin(), 
+      unsigned numRHSMembers = std::distance(rhsMembers.begin(),
                                              rhsMembers.end());
       if (numLHSMembers != numRHSMembers)
         return numLHSMembers < numRHSMembers ? Descending : Ascending;

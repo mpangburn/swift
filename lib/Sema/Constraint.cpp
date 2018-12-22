@@ -54,8 +54,6 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second,
   case ConstraintKind::Conversion:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::ArgumentConversion:
-  case ConstraintKind::ArgumentTupleConversion:
-  case ConstraintKind::OperatorArgumentTupleConversion:
   case ConstraintKind::OperatorArgumentConversion:
   case ConstraintKind::ConformsTo:
   case ConstraintKind::LiteralConformsTo:
@@ -65,10 +63,13 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second,
   case ConstraintKind::EscapableFunctionOf:
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::OptionalObject:
+  case ConstraintKind::FunctionInput:
+  case ConstraintKind::FunctionResult:
     assert(!First.isNull());
     assert(!Second.isNull());
     break;
   case ConstraintKind::ApplicableFunction:
+  case ConstraintKind::DynamicCallableApplicableFunction:
     assert(First->is<FunctionType>()
            && "The left-hand side type should be a function type");
     break;
@@ -113,8 +114,6 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second, Type Third,
   case ConstraintKind::Conversion:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::ArgumentConversion:
-  case ConstraintKind::ArgumentTupleConversion:
-  case ConstraintKind::OperatorArgumentTupleConversion:
   case ConstraintKind::OperatorArgumentConversion:
   case ConstraintKind::ConformsTo:
   case ConstraintKind::LiteralConformsTo:
@@ -125,11 +124,14 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second, Type Third,
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::OptionalObject:
   case ConstraintKind::ApplicableFunction:
+  case ConstraintKind::DynamicCallableApplicableFunction:
   case ConstraintKind::ValueMember:
   case ConstraintKind::UnresolvedValueMember:
   case ConstraintKind::Defaultable:
   case ConstraintKind::BindOverload:
   case ConstraintKind::Disjunction:
+  case ConstraintKind::FunctionInput:
+  case ConstraintKind::FunctionResult:
     llvm_unreachable("Wrong constructor");
 
   case ConstraintKind::KeyPath:
@@ -218,8 +220,6 @@ Constraint *Constraint::clone(ConstraintSystem &cs) const {
   case ConstraintKind::Conversion:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::ArgumentConversion:
-  case ConstraintKind::ArgumentTupleConversion:
-  case ConstraintKind::OperatorArgumentTupleConversion:
   case ConstraintKind::OperatorArgumentConversion:
   case ConstraintKind::ConformsTo:
   case ConstraintKind::LiteralConformsTo:
@@ -229,8 +229,11 @@ Constraint *Constraint::clone(ConstraintSystem &cs) const {
   case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::ApplicableFunction:
+  case ConstraintKind::DynamicCallableApplicableFunction:
   case ConstraintKind::OptionalObject:
   case ConstraintKind::Defaultable:
+  case ConstraintKind::FunctionInput:
+  case ConstraintKind::FunctionResult:
     return create(cs, getKind(), getFirstType(), getSecondType(), getLocator());
 
   case ConstraintKind::BindOverload:
@@ -290,10 +293,6 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
   case ConstraintKind::Conversion: Out << " conv "; break;
   case ConstraintKind::BridgingConversion: Out << " bridging conv "; break;
   case ConstraintKind::ArgumentConversion: Out << " arg conv "; break;
-  case ConstraintKind::ArgumentTupleConversion:
-      Out << " arg tuple conv "; break;
-  case ConstraintKind::OperatorArgumentTupleConversion:
-      Out << " operator arg tuple conv "; break;
   case ConstraintKind::OperatorArgumentConversion:
       Out << " operator arg conv "; break;
   case ConstraintKind::ConformsTo: Out << " conforms to "; break;
@@ -301,6 +300,8 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
   case ConstraintKind::CheckedCast: Out << " checked cast to "; break;
   case ConstraintKind::SelfObjectOfProtocol: Out << " Self type of "; break;
   case ConstraintKind::ApplicableFunction: Out << " applicable fn "; break;
+  case ConstraintKind::DynamicCallableApplicableFunction:
+      Out << " dynamic callable applicable fn "; break;
   case ConstraintKind::DynamicTypeOf: Out << " dynamicType type of "; break;
   case ConstraintKind::EscapableFunctionOf: Out << " @escaping type of "; break;
   case ConstraintKind::OpenedExistentialOf: Out << " opened archetype of "; break;
@@ -321,6 +322,10 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
       break;
   case ConstraintKind::OptionalObject:
       Out << " optional with object type "; break;
+  case ConstraintKind::FunctionInput:
+    Out << " bind function input of "; break;
+  case ConstraintKind::FunctionResult:
+    Out << " bind function result of "; break;
   case ConstraintKind::BindOverload: {
     Out << " bound to ";
     auto overload = getOverloadChoice();
@@ -390,7 +395,7 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
 
   if (auto *fix = getFix()) {
     Out << ' ';
-    fix->print(Out, sm);
+    fix->print(Out);
   }
 
   if (Locator) {
@@ -487,14 +492,13 @@ gatherReferencedTypeVars(Constraint *constraint,
     LLVM_FALLTHROUGH;
 
   case ConstraintKind::ApplicableFunction:
+  case ConstraintKind::DynamicCallableApplicableFunction:
   case ConstraintKind::Bind:
   case ConstraintKind::BindParam:
   case ConstraintKind::BindToPointerType:
   case ConstraintKind::ArgumentConversion:
   case ConstraintKind::Conversion:
   case ConstraintKind::BridgingConversion:
-  case ConstraintKind::ArgumentTupleConversion:
-  case ConstraintKind::OperatorArgumentTupleConversion:
   case ConstraintKind::OperatorArgumentConversion:
   case ConstraintKind::CheckedCast:
   case ConstraintKind::Equal:
@@ -509,6 +513,8 @@ gatherReferencedTypeVars(Constraint *constraint,
   case ConstraintKind::ConformsTo:
   case ConstraintKind::LiteralConformsTo:
   case ConstraintKind::SelfObjectOfProtocol:
+  case ConstraintKind::FunctionInput:
+  case ConstraintKind::FunctionResult:
     constraint->getFirstType()->getTypeVariables(typeVars);
     constraint->getSecondType()->getTypeVariables(typeVars);
     break;
@@ -534,6 +540,17 @@ static void uniqueTypeVariables(SmallVectorImpl<TypeVariableType *> &typeVars) {
                                   return !knownTypeVars.insert(typeVar).second;
                                 }),
                  typeVars.end());
+}
+
+bool Constraint::isExplicitConversion() const {
+  assert(Kind == ConstraintKind::Disjunction);
+
+  if (auto *locator = getLocator()) {
+    if (auto anchor = locator->getAnchor())
+      return isa<CoerceExpr>(anchor);
+  }
+
+  return false;
 }
 
 Constraint *Constraint::create(ConstraintSystem &cs, ConstraintKind kind, 

@@ -83,10 +83,12 @@ std::string GenericSpecializationMangler::mangle(GenericSignature *Sig) {
   }
 
   bool First = true;
-  for (auto ParamType : Sig->getSubstitutableParams()) {
-    appendType(Type(ParamType).subst(SubMap)->getCanonicalType());
-    appendListSeparator(First);
-  }
+  Sig->forEachParam([&](GenericTypeParamType *ParamType, bool Canonical) {
+    if (Canonical) {
+      appendType(Type(ParamType).subst(SubMap)->getCanonicalType());
+      appendListSeparator(First);
+    }
+  });
   assert(!First && "no generic substitutions");
 
   if (isInlined)
@@ -200,6 +202,12 @@ FunctionSignatureSpecializationMangler::mangleConstantProp(LiteralInst *LI) {
   switch (LI->getKind()) {
   default:
     llvm_unreachable("unknown literal");
+  case SILInstructionKind::DynamicFunctionRefInst: {
+    SILFunction *F = cast<DynamicFunctionRefInst>(LI)->getReferencedFunction();
+    ArgOpBuffer << 'f';
+    appendIdentifier(F->getName());
+    break;
+  }
   case SILInstructionKind::FunctionRefInst: {
     SILFunction *F = cast<FunctionRefInst>(LI)->getReferencedFunction();
     ArgOpBuffer << 'f';

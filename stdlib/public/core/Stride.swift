@@ -273,7 +273,7 @@ extension StrideTo: Sequence {
   ///
   /// - Complexity: O(1).
   @inlinable
-  public func makeIterator() -> StrideToIterator<Element> {
+  public __consuming func makeIterator() -> StrideToIterator<Element> {
     return StrideToIterator(_start: _start, end: _end, stride: _stride)
   }
 
@@ -287,13 +287,6 @@ extension StrideTo: Sequence {
       count += 1
     }
     return count
-  }
-
-  @inlinable
-  public func _preprocessingPass<R>(
-    _ preprocess: () throws -> R
-  ) rethrows -> R? {
-    return try preprocess()
   }
 
   @inlinable
@@ -488,7 +481,7 @@ extension StrideThrough: Sequence {
   ///
   /// - Complexity: O(1).
   @inlinable
-  public func makeIterator() -> StrideThroughIterator<Element> {
+  public __consuming func makeIterator() -> StrideThroughIterator<Element> {
     return StrideThroughIterator(_start: _start, end: _end, stride: _stride)
   }
 
@@ -502,13 +495,6 @@ extension StrideThrough: Sequence {
       count += 1
     }
     return count
-  }
-
-  @inlinable
-  public func _preprocessingPass<R>(
-    _ preprocess: () throws -> R
-  ) rethrows -> R? {
-    return try preprocess()
   }
 
   @inlinable

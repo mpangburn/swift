@@ -121,6 +121,7 @@ private:
   llvm::StringMap<std::pair<std::vector<DependencyEntryTy>, DependencyMaskTy>> Dependencies;
 
   /// The set of marked nodes.
+
   llvm::SmallPtrSet<const void *, 16> Marked;
 
   /// A list of all external dependencies that cannot be resolved from just this
@@ -143,33 +144,6 @@ private:
 
   LoadResult loadFromBuffer(const void *node, llvm::MemoryBuffer &buffer);
 
-  // FIXME: We should be able to use llvm::mapped_iterator for this, but
-  // StringMapConstIterator isn't quite an InputIterator (no ->).
-  class StringSetIterator {
-    llvm::StringSet<>::const_iterator I;
-  public:
-    using value_type = llvm::StringSet<>::const_iterator::value_type;
-    using iterator_category = std::input_iterator_tag;
-    using difference_type = ptrdiff_t;
-    using reference = value_type &;
-    using pointer = value_type *;
-
-    /*implicit*/ StringSetIterator(llvm::StringSet<>::const_iterator base)
-       : I(base) {}
-
-    StringSetIterator &operator++() {
-      ++I;
-      return *this;
-    }
-
-    StringRef operator*() const {
-      return I->getKey();
-    }
-
-    bool operator==(StringSetIterator other) const { return I == other.I; }
-    bool operator!=(StringSetIterator other) const { return I != other.I; }
-  };
-
 protected:
   LoadResult loadFromString(const void *node, StringRef data);
   LoadResult loadFromPath(const void *node, StringRef path);
@@ -179,6 +153,8 @@ protected:
     assert(newlyInserted && "node is already in graph");
     (void)newlyInserted;
   }
+
+  /// See DependencyGraph::markTransitive.
 
   void markTransitive(SmallVectorImpl<const void *> &visited,
                       const void *node, MarkTracerImpl *tracer = nullptr);
@@ -195,9 +171,8 @@ protected:
   }
 
 public:
-  llvm::iterator_range<StringSetIterator> getExternalDependencies() const {
-    return llvm::make_range(StringSetIterator(ExternalDependencies.begin()),
-                            StringSetIterator(ExternalDependencies.end()));
+  decltype(ExternalDependencies.keys()) getExternalDependencies() const {
+    return ExternalDependencies.keys();
   }
 };
 
@@ -282,7 +257,7 @@ public:
   /// Marks \p node and all nodes that depend on \p node, and places any nodes
   /// that get transitively marked into \p visited.
   ///
-  /// Nodes that have been previously marked are not included in \p newlyMarked,
+  /// Nodes that have been previously marked are not included in \p visited,
   /// nor are their successors traversed, <em>even if their "provides" set has
   /// been updated since it was marked.</em> (However, nodes that depend on the
   /// given \p node are always traversed.)
@@ -292,6 +267,14 @@ public:
   ///
   /// If you want to see how each node gets added to \p visited, pass a local
   /// MarkTracer instance to \p tracer.
+  ///
+  /// Conservatively assumes that there exists a "cascading" edge into the
+  /// starting node. Therefore, mark the start. For each visited node, add it to
+  /// \p visited, and mark it if some incoming edge cascades. The start node is
+  /// NOT added to \p visited.
+  ///
+  /// The traversal routines use
+  /// \p visited to avoid endless recursion.
   template <unsigned N>
   void markTransitive(SmallVector<T, N> &visited, T node,
                       MarkTracer *tracer = nullptr) {

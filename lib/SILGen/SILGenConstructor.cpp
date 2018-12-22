@@ -35,7 +35,7 @@ static SILValue emitConstructorMetatypeArg(SILGenFunction &SGF,
   auto ctorFnType = ctor->getInterfaceType()->castTo<AnyFunctionType>();
   assert(ctorFnType->getParams().size() == 1 &&
          "more than one self parameter?");
-  Type metatype = ctorFnType->getParams()[0].getType();
+  Type metatype = ctorFnType->getParams()[0].getOldType();
   auto *DC = ctor->getInnermostDeclContext();
   auto &AC = SGF.getASTContext();
   auto VD =
@@ -204,10 +204,6 @@ void SILGenFunction::emitValueConstructor(ConstructorDecl *ctor) {
   // Get the 'self' decl and type.
   VarDecl *selfDecl = ctor->getImplicitSelfDecl();
   auto &lowering = getTypeLowering(selfDecl->getType());
-  SILType selfTy = lowering.getLoweredType();
-  (void)selfTy;
-  assert(!selfTy.getClassOrBoundGenericClass()
-         && "can't emit a class ctor here");
 
   // Decide if we need to do extra work to warn on unsafe behavior in pre-Swift-5
   // modes.
@@ -270,7 +266,7 @@ void SILGenFunction::emitValueConstructor(ConstructorDecl *ctor) {
       B.createReturn(ctor, emitEmptyTuple(ctor));
     } else {
       // Pass 'nil' as the return value to the exit BB.
-      failureExitArg = failureExitBB->createPHIArgument(
+      failureExitArg = failureExitBB->createPhiArgument(
           resultLowering.getLoweredType(), ValueOwnershipKind::Owned);
       SILValue nilResult =
           B.createEnum(ctor, SILValue(), getASTContext().getOptionalNoneDecl(),
@@ -485,9 +481,9 @@ void SILGenFunction::emitClassConstructorAllocator(ConstructorDecl *ctor) {
   // Allocate the 'self' value.
   bool useObjCAllocation = usesObjCAllocator(selfClassDecl);
 
-  if (ctor->isConvenienceInit() || ctor->hasClangNode()) {
-    // For a convenience initializer or an initializer synthesized
-    // for an Objective-C class, allocate using the metatype.
+  if (ctor->hasClangNode()) {
+    // For an allocator thunk synthesized for an Objective-C init method,
+    // allocate using the metatype.
     SILValue allocArg = selfMetaValue;
 
     // When using Objective-C allocation, convert the metatype
@@ -503,6 +499,7 @@ void SILGenFunction::emitClassConstructorAllocator(ConstructorDecl *ctor) {
     selfValue = B.createAllocRefDynamic(Loc, allocArg, selfTy,
                                         useObjCAllocation, {}, {});
   } else {
+    assert(ctor->isDesignatedInit());
     // For a designated initializer, we know that the static type being
     // allocated is the type of the class that defines the designated
     // initializer.
@@ -654,7 +651,7 @@ void SILGenFunction::emitClassConstructorInitializer(ConstructorDecl *ctor) {
                                       FunctionSection::Postmatter);
 
     failureExitBB = createBasicBlock();
-    failureExitArg = failureExitBB->createPHIArgument(
+    failureExitArg = failureExitBB->createPhiArgument(
         resultLowering.getLoweredType(), ValueOwnershipKind::Owned);
 
     Cleanups.emitCleanupsForReturn(ctor, IsForUnwind);
@@ -794,7 +791,7 @@ static ManagedValue emitSelfForMemberInit(SILGenFunction &SGF, SILLocation loc,
       .getAsSingleValue(SGF, loc);
   else
     return SGF.emitAddressOfLocalVarDecl(loc, selfDecl, selfFormalType,
-                                         AccessKind::Write);
+                                         SGFAccessKind::Write);
 }
 
 static LValue emitLValueForMemberInit(SILGenFunction &SGF, SILLocation loc,
@@ -803,7 +800,7 @@ static LValue emitLValueForMemberInit(SILGenFunction &SGF, SILLocation loc,
   CanType selfFormalType = selfDecl->getType()->getCanonicalType();
   auto self = emitSelfForMemberInit(SGF, loc, selfDecl);
   return SGF.emitPropertyLValue(loc, self, selfFormalType, property,
-                                LValueOptions(), AccessKind::Write,
+                                LValueOptions(), SGFAccessKind::Write,
                                 AccessSemantics::DirectToStorage);
 }
 
@@ -860,65 +857,6 @@ static void emitMemberInit(SILGenFunction &SGF, VarDecl *selfDecl,
 #include "swift/AST/PatternNodes.def"
     llvm_unreachable("Refutable pattern in pattern binding");
   }
-}
-
-static SILValue getBehaviorInitStorageFn(SILGenFunction &SGF,
-                                         VarDecl *behaviorVar) {
-  Mangle::ASTMangler NewMangler;
-  std::string behaviorInitName = NewMangler.mangleBehaviorInitThunk(behaviorVar);
-  
-  SILFunction *thunkFn;
-  // Skip out early if we already emitted this thunk.
-  if (auto existing = SGF.SGM.M.lookUpFunction(behaviorInitName)) {
-    thunkFn = existing;
-  } else {
-    auto init = behaviorVar->getBehavior()->InitStorageDecl.getDecl();
-    auto initFn = SGF.SGM.getFunction(SILDeclRef(init), NotForDefinition);
-    
-    // Emit a thunk to inject the `self` metatype and implode tuples.
-    auto storageVar = behaviorVar->getBehavior()->StorageDecl;
-    auto selfTy = behaviorVar->getDeclContext()->getDeclaredInterfaceType();
-    auto initTy = SGF.getLoweredType(selfTy).getFieldType(behaviorVar,
-                                                          SGF.SGM.M);
-    auto storageTy = SGF.getLoweredType(selfTy).getFieldType(storageVar,
-                                                             SGF.SGM.M);
-    
-    auto initConstantTy = initFn->getLoweredType().castTo<SILFunctionType>();
-    
-    auto param = SILParameterInfo(initTy.getASTType(),
-                        initTy.isAddress() ? ParameterConvention::Indirect_In
-                                           : ParameterConvention::Direct_Owned);
-    auto result = SILResultInfo(storageTy.getASTType(),
-                              storageTy.isAddress() ? ResultConvention::Indirect
-                                                    : ResultConvention::Owned);
-    
-    initConstantTy = SILFunctionType::get(initConstantTy->getGenericSignature(),
-                                          initConstantTy->getExtInfo(),
-                                          SILCoroutineKind::None,
-                                          ParameterConvention::Direct_Unowned,
-                                          param,
-                                          /*yields*/ {},
-                                          result,
-                                          // TODO: throwing initializer?
-                                          None,
-                                          SGF.getASTContext());
-    
-    // TODO: Generate the body of the thunk.
-    SILGenFunctionBuilder builder(SGF);
-    thunkFn = builder.getOrCreateFunction(
-        SILLocation(behaviorVar), behaviorInitName, SILLinkage::PrivateExternal,
-        initConstantTy, IsBare, IsTransparent, IsSerialized);
-  }
-  return SGF.B.createFunctionRef(behaviorVar, thunkFn);
-}
-
-static SILValue getBehaviorSetterFn(SILGenFunction &SGF, VarDecl *behaviorVar) {
-  auto set = behaviorVar->getSetter();
-  auto setFn = SGF.SGM.getFunction(SILDeclRef(set), NotForDefinition);
-
-  // TODO: The setter may need to be a thunk, to implode tuples or perform
-  // reabstractions.
-  return SGF.B.createFunctionRef(behaviorVar, setFn);
 }
 
 static Type getInitializationTypeInContext(
@@ -984,39 +922,6 @@ void SILGenFunction::emitMemberInitializers(DeclContext *dc,
 
         emitMemberInit(*this, selfDecl, entry.getPattern(), std::move(result));
       }
-    }
-    
-    // Introduce behavior initialization markers for properties that need them.
-    if (auto var = dyn_cast<VarDecl>(member)) {
-      if (var->isStatic()) continue;
-      if (!var->hasBehaviorNeedingInitialization()) continue;
-      
-      // Get the initializer method for behavior.
-      auto init = var->getBehavior()->InitStorageDecl;
-      SILValue initFn = getBehaviorInitStorageFn(*this, var);
-      
-      // Get the behavior's storage we need to initialize.
-      auto storage = var->getBehavior()->StorageDecl;
-      LValue storageRef = emitLValueForMemberInit(*this, var, selfDecl,storage);
-      // Shed any reabstraction over the member.
-      while (storageRef.isLastComponentTranslation())
-        storageRef.dropLastTranslationComponent();
-      
-      auto storageAddr = emitAddressOfLValue(var, std::move(storageRef),
-                                             AccessKind::ReadWrite);
-      
-      // Get the setter.
-      auto setterFn = getBehaviorSetterFn(*this, var);
-      auto self = emitSelfForMemberInit(*this, var, selfDecl);
-      
-      auto mark = B.createMarkUninitializedBehavior(var,
-               initFn, init.getSubstitutions(),
-               storageAddr.getValue(),
-               setterFn, getForwardingSubstitutionMap(), self.getValue(),
-               getLoweredType(var->getType()).getAddressType());
-      
-      // The mark instruction stands in for the behavior property.
-      VarLocs[var].value = mark;
     }
   }
 }

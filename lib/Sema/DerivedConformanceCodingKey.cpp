@@ -29,7 +29,7 @@ using namespace swift;
 /// Sets the body of the given function to `return nil`.
 ///
 /// \param funcDecl The function whose body to set.
-static void deriveNilReturn(AbstractFunctionDecl *funcDecl) {
+static void deriveNilReturn(AbstractFunctionDecl *funcDecl, void *) {
   auto *parentDC = funcDecl->getDeclContext();
   auto &C = parentDC->getASTContext();
 
@@ -43,7 +43,7 @@ static void deriveNilReturn(AbstractFunctionDecl *funcDecl) {
 /// Sets the body of the given function to `return self.rawValue`.
 ///
 /// \param funcDecl The function whose body to set.
-static void deriveRawValueReturn(AbstractFunctionDecl *funcDecl) {
+static void deriveRawValueReturn(AbstractFunctionDecl *funcDecl, void *) {
   auto *parentDC = funcDecl->getDeclContext();
   auto &C = parentDC->getASTContext();
 
@@ -62,7 +62,7 @@ static void deriveRawValueReturn(AbstractFunctionDecl *funcDecl) {
 /// the parameter of the given constructor.
 ///
 /// \param initDecl The constructor whose body to set.
-static void deriveRawValueInit(AbstractFunctionDecl *initDecl) {
+static void deriveRawValueInit(AbstractFunctionDecl *initDecl, void *) {
   auto *parentDC = initDecl->getDeclContext();
   auto &C = parentDC->getASTContext();
 
@@ -126,14 +126,12 @@ static ValueDecl *deriveInitDecl(DerivedConformance &derived, Type paramType,
   DeclName name(C, DeclBaseName::createConstructor(), paramList);
 
   // init(rawValue:) decl
-  auto *selfDecl = ParamDecl::createSelf(SourceLoc(), parentDC,
-                                         /*static*/false, /*inout*/true);
   auto *initDecl =
     new (C) ConstructorDecl(name, SourceLoc(),
                             /*Failability=*/OTK_Optional,
                             /*FailabilityLoc=*/SourceLoc(),
                             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
-                            selfDecl, paramList,
+                            paramList,
                             /*GenericParams=*/nullptr, parentDC);
 
   initDecl->setImplicit();
@@ -192,7 +190,7 @@ static ValueDecl *deriveProperty(DerivedConformance &derived, Type type,
 ///
 /// \param strValDecl The function whose body to set.
 static void
-deriveBodyCodingKey_enum_stringValue(AbstractFunctionDecl *strValDecl) {
+deriveBodyCodingKey_enum_stringValue(AbstractFunctionDecl *strValDecl, void *) {
   // enum SomeEnum {
   //   case A, B, C
   //   @derived var stringValue: String {
@@ -257,7 +255,7 @@ deriveBodyCodingKey_enum_stringValue(AbstractFunctionDecl *strValDecl) {
 ///
 /// \param initDecl The function whose body to set.
 static void
-deriveBodyCodingKey_init_stringValue(AbstractFunctionDecl *initDecl) {
+deriveBodyCodingKey_init_stringValue(AbstractFunctionDecl *initDecl, void *) {
   // enum SomeEnum {
   //   case A, B, C
   //   @derived init?(stringValue: String) {
@@ -281,7 +279,7 @@ deriveBodyCodingKey_init_stringValue(AbstractFunctionDecl *initDecl) {
 
   auto elements = enumDecl->getAllElements();
   if (elements.empty() /* empty enum */) {
-    deriveNilReturn(initDecl);
+    deriveNilReturn(initDecl, nullptr);
     return;
   }
 

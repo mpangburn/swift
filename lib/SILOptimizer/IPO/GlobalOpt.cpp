@@ -175,8 +175,8 @@ public:
 
   SILBasicBlock *remapBasicBlock(SILBasicBlock *BB) { return BB; }
 
-  SILValue remapValue(SILValue Value) {
-    return SILCloner<InstructionsCloner>::remapValue(Value);
+  SILValue getMappedValue(SILValue Value) {
+    return SILCloner<InstructionsCloner>::getMappedValue(Value);
   }
 
   void postProcess(SILInstruction *Orig, SILInstruction *Cloned) {
@@ -200,7 +200,7 @@ public:
 // If this is a call to a global initializer, map it.
 void SILGlobalOpt::collectGlobalInitCall(ApplyInst *AI) {
   SILFunction *F = AI->getReferencedFunction();
-  if (!F || !F->isGlobalInit())
+  if (!F || !F->isGlobalInit() || !ApplySite(AI).canOptimize())
     return;
 
   GlobalInitCallMap[F].push_back(AI);
@@ -247,10 +247,10 @@ static SILFunction *getGlobalGetterFunction(SILOptFunctionBuilder &FunctionBuild
                                             SILModule &M,
                                             SILLocation loc,
                                             VarDecl *varDecl) {
-  auto getterName = mangleGetter(varDecl);
+  auto getterNameTmp = mangleGetter(varDecl);
 
   // Check if a getter was generated already.
-  if (auto *F = M.lookUpFunction(getterName))
+  if (auto *F = M.lookUpFunction(getterNameTmp))
     return F;
 
   auto Linkage = (varDecl->getEffectiveAccess() >= AccessLevel::Public
@@ -273,9 +273,10 @@ static SILFunction *getGlobalGetterFunction(SILOptFunctionBuilder &FunctionBuild
                          ParameterConvention::Direct_Unowned,
                          /*params*/ {}, /*yields*/ {}, Results, None,
                          M.getASTContext());
-  return FunctionBuilder.getOrCreateFunction(loc, getterName, Linkage,
-                                             LoweredType, IsBare,
-                                             IsNotTransparent, Serialized);
+  auto getterName = M.allocateCopy(getterNameTmp);
+  return FunctionBuilder.getOrCreateFunction(
+      loc, getterName, Linkage, LoweredType, IsBare, IsNotTransparent,
+      Serialized, IsNotDynamic);
 }
 
 /// Generate getter from the initialization code whose result is stored by a
@@ -291,13 +292,10 @@ static SILFunction *genGetterFromInit(SILOptFunctionBuilder &FunctionBuilder,
   auto V = Store->getSrc();
 
   SmallVector<SILInstruction *, 8> Insts;
-  Insts.push_back(Store);
-  Insts.push_back(cast<SingleValueInstruction>(Store->getDest()));
   if (!analyzeStaticInitializer(V, Insts))
     return nullptr;
-
-  // Produce a correct order of instructions.
-  std::reverse(Insts.begin(), Insts.end());
+  Insts.push_back(cast<SingleValueInstruction>(Store->getDest()));
+  Insts.push_back(Store);
 
   auto *GetterF = getGlobalGetterFunction(FunctionBuilder,
                                           Store->getModule(),
@@ -305,8 +303,8 @@ static SILFunction *genGetterFromInit(SILOptFunctionBuilder &FunctionBuilder,
                                           varDecl);
 
   GetterF->setDebugScope(Store->getFunction()->getDebugScope());
-  if (!Store->getFunction()->hasQualifiedOwnership())
-    GetterF->setUnqualifiedOwnership();
+  if (!Store->getFunction()->hasOwnership())
+    GetterF->setOwnershipEliminated();
   auto *EntryBB = GetterF->createBasicBlock();
 
   // Copy instructions into GetterF
@@ -547,17 +545,16 @@ static SILFunction *genGetterFromInit(SILOptFunctionBuilder &FunctionBuilder,
                                           InitF->getModule(),
                                           InitF->getLocation(),
                                           varDecl);
-  if (!InitF->hasQualifiedOwnership())
-    GetterF->setUnqualifiedOwnership();
+  if (!InitF->hasOwnership())
+    GetterF->setOwnershipEliminated();
 
-  auto *EntryBB = GetterF->createBasicBlock();
-  // Copy InitF into GetterF
-  BasicBlockCloner Cloner(&*InitF->begin(), EntryBB, /*WithinFunction=*/false);
-  Cloner.clone();
+  // Copy InitF into GetterF, including the entry arguments.
+  SILFunctionCloner Cloner(GetterF);
+  Cloner.cloneFunction(InitF);
   GetterF->setInlined();
 
   // Find the store instruction
-  auto BB = EntryBB;
+  auto *BB = GetterF->getEntryBlock();
   SILValue Val;
   SILInstruction *Store;
   for (auto II = BB->begin(), E = BB->end(); II != E;) {

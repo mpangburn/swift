@@ -42,7 +42,7 @@ static SILValue stripOffCopyValue(SILValue V) {
   return V;
 }
 
-/// \brief Returns True if the operand or one of its users is captured.
+/// Returns True if the operand or one of its users is captured.
 static bool useCaptured(Operand *UI) {
   auto *User = UI->getUser();
 
@@ -497,13 +497,21 @@ static bool rewriteAllocBoxAsAllocStack(AllocBoxInst *ABI) {
 
 namespace {
 
-/// \brief A SILCloner subclass which clones a closure function while
+/// A SILCloner subclass which clones a closure function while
 /// promoting some of its box parameters to stack addresses.
 class PromotedParamCloner : public SILClonerWithScopes<PromotedParamCloner> {
-public:
   friend class SILInstructionVisitor<PromotedParamCloner>;
   friend class SILCloner<PromotedParamCloner>;
 
+  SILFunction *Orig;
+  ArgIndexList &PromotedArgIndices;
+  SmallVector<SILValue, 4> NewPromotedArgs;
+
+  // The values in the original function that are promoted to stack
+  // references.
+  llvm::SmallSet<SILValue, 4> OrigPromotedParameters;
+
+public:
   PromotedParamCloner(SILOptFunctionBuilder &FuncBuilder, SILFunction *Orig, IsSerialized_t Serialized,
                       ArgIndexList &PromotedArgIndices,
                       llvm::StringRef ClonedName);
@@ -523,13 +531,6 @@ private:
   void visitStrongRetainInst(StrongRetainInst *Inst);
   void visitCopyValueInst(CopyValueInst *Inst);
   void visitProjectBoxInst(ProjectBoxInst *Inst);
-
-  SILFunction *Orig;
-  ArgIndexList &PromotedArgIndices;
-
-  // The values in the original function that are promoted to stack
-  // references.
-  llvm::SmallSet<SILValue, 4> PromotedParameters;
 };
 } // end anonymous namespace
 
@@ -542,6 +543,7 @@ PromotedParamCloner::PromotedParamCloner(SILOptFunctionBuilder &FuncBuilder,
           *initCloned(FuncBuilder, Orig, Serialized, PromotedArgIndices,
                       ClonedName)),
       Orig(Orig), PromotedArgIndices(PromotedArgIndices) {
+  NewPromotedArgs.reserve(PromotedArgIndices.size());
   assert(Orig->getDebugScope()->getParentFunction() !=
          getCloned()->getDebugScope()->getParentFunction());
 }
@@ -556,7 +558,7 @@ static std::string getClonedName(SILFunction *F, IsSerialized_t Serialized,
   return Mangler.mangle();
 }
 
-/// \brief Create the function corresponding to the clone of the
+/// Create the function corresponding to the clone of the
 /// original closure with the signature modified to reflect promoted
 /// parameters (which are specified by PromotedArgIndices).
 SILFunction *PromotedParamCloner::
@@ -607,19 +609,19 @@ initCloned(SILOptFunctionBuilder &FuncBuilder, SILFunction *Orig,
   auto *Fn = FuncBuilder.createFunction(
       SILLinkage::Shared, ClonedName, ClonedTy, Orig->getGenericEnvironment(),
       Orig->getLocation(), Orig->isBare(), IsNotTransparent, Serialized,
-      Orig->getEntryCount(), Orig->isThunk(), Orig->getClassSubclassScope(),
-      Orig->getInlineStrategy(), Orig->getEffectsKind(), Orig,
-      Orig->getDebugScope());
+      IsNotDynamic, Orig->getEntryCount(), Orig->isThunk(),
+      Orig->getClassSubclassScope(), Orig->getInlineStrategy(),
+      Orig->getEffectsKind(), Orig, Orig->getDebugScope());
   for (auto &Attr : Orig->getSemanticsAttrs()) {
     Fn->addSemanticsAttr(Attr);
   }
-  if (!Orig->hasQualifiedOwnership()) {
-    Fn->setUnqualifiedOwnership();
+  if (!Orig->hasOwnership()) {
+    Fn->setOwnershipEliminated();
   }
   return Fn;
 }
 
-/// \brief Populate the body of the cloned closure, modifying instructions as
+/// Populate the body of the cloned closure, modifying instructions as
 /// necessary to take into consideration the removed parameters.
 void
 PromotedParamCloner::populateCloned() {
@@ -628,6 +630,13 @@ PromotedParamCloner::populateCloned() {
   // Create arguments for the entry block
   SILBasicBlock *OrigEntryBB = &*Orig->begin();
   SILBasicBlock *ClonedEntryBB = Cloned->createBasicBlock();
+
+  SmallVector<SILValue, 4> entryArgs;
+  entryArgs.reserve(OrigEntryBB->getArguments().size());
+
+  // Initialize all NewPromotedArgs slots to an invalid value.
+  NewPromotedArgs.resize(OrigEntryBB->getArguments().size());
+
   unsigned ArgNo = 0;
   auto I = OrigEntryBB->args_begin(), E = OrigEntryBB->args_end();
   while (I != E) {
@@ -639,52 +648,41 @@ PromotedParamCloner::populateCloned() {
       auto promotedTy = boxTy->getFieldType(Cloned->getModule(), 0);
       auto *promotedArg =
           ClonedEntryBB->createFunctionArgument(promotedTy, (*I)->getDecl());
-      PromotedParameters.insert(*I);
-      
-      // Map any projections of the box to the promoted argument.
-      for (auto use : (*I)->getUses()) {
-        if (auto project = dyn_cast<ProjectBoxInst>(use->getUser())) {
-          ValueMap.insert(std::make_pair(project, promotedArg));
-        }
-      }
-      
+      OrigPromotedParameters.insert(*I);
+
+      NewPromotedArgs[ArgNo] = promotedArg;
+
+      // All uses of the promoted box should either be projections, which are
+      // folded when visited, or copy/destroy operations which are ignored.
+      entryArgs.push_back(SILValue());
     } else {
       // Create a new argument which copies the original argument.
-      SILValue MappedValue = ClonedEntryBB->createFunctionArgument(
-          (*I)->getType(), (*I)->getDecl());
-      ValueMap.insert(std::make_pair(*I, MappedValue));
+      entryArgs.push_back(ClonedEntryBB->createFunctionArgument(
+          (*I)->getType(), (*I)->getDecl()));
     }
     ++ArgNo;
     ++I;
   }
 
-  getBuilder().setInsertionPoint(ClonedEntryBB);
-  BBMap.insert(std::make_pair(OrigEntryBB, ClonedEntryBB));
-  // Recursively visit original BBs in depth-first preorder, starting with the
-  // entry block, cloning all instructions other than terminators.
-  visitSILBasicBlock(OrigEntryBB);
-
-  // Now iterate over the BBs and fix up the terminators.
-  for (auto BI = BBMap.begin(), BE = BBMap.end(); BI != BE; ++BI) {
-    getBuilder().setInsertionPoint(BI->second);
-    visit(BI->first->getTerminator());
-  }
+  // Visit original BBs in depth-first preorder, starting with the
+  // entry block, cloning all instructions and terminators.
+  cloneFunctionBody(Orig, ClonedEntryBB, entryArgs);
 }
 
-/// \brief Handle a strong_release instruction during cloning of a closure; if
+/// Handle a strong_release instruction during cloning of a closure; if
 /// it is a strong release of a promoted box argument, then it is replaced with
 /// a ReleaseValue of the new object type argument, otherwise it is handled
 /// normally.
 void
 PromotedParamCloner::visitStrongReleaseInst(StrongReleaseInst *Inst) {
   // If it's a release of a promoted parameter, just drop the instruction.
-  if (PromotedParameters.count(Inst->getOperand()))
+  if (OrigPromotedParameters.count(Inst->getOperand()))
     return;
 
   SILCloner<PromotedParamCloner>::visitStrongReleaseInst(Inst);
 }
 
-/// \brief Handle a strong_release instruction during cloning of a closure; if
+/// Handle a strong_release instruction during cloning of a closure; if
 /// it is a strong release of a promoted box argument, then it is replaced with
 /// a ReleaseValue of the new object type argument, otherwise it is handled
 /// normally.
@@ -696,7 +694,7 @@ void PromotedParamCloner::visitDestroyValueInst(DestroyValueInst *Inst) {
     Tmp = CopyOp;
   }
 
-  if (PromotedParameters.count(Tmp->getOperand(0)))
+  if (OrigPromotedParameters.count(Tmp->getOperand(0)))
     return;
 
   SILCloner<PromotedParamCloner>::visitDestroyValueInst(Inst);
@@ -705,7 +703,7 @@ void PromotedParamCloner::visitDestroyValueInst(DestroyValueInst *Inst) {
 void
 PromotedParamCloner::visitStrongRetainInst(StrongRetainInst *Inst) {
   // If it's a retain of a promoted parameter, just drop the instruction.
-  if (PromotedParameters.count(Inst->getOperand()))
+  if (OrigPromotedParameters.count(Inst->getOperand()))
     return;
 
   SILCloner<PromotedParamCloner>::visitStrongRetainInst(Inst);
@@ -717,7 +715,7 @@ void PromotedParamCloner::visitCopyValueInst(CopyValueInst *CVI) {
   while (auto *CopyOp = dyn_cast<CopyValueInst>(Tmp->getOperand())) {
     Tmp = CopyOp;
   }
-  if (PromotedParameters.count(Tmp->getOperand()))
+  if (OrigPromotedParameters.count(Tmp->getOperand()))
     return;
 
   SILCloner<PromotedParamCloner>::visitCopyValueInst(CVI);
@@ -726,10 +724,12 @@ void PromotedParamCloner::visitCopyValueInst(CopyValueInst *CVI) {
 void PromotedParamCloner::visitProjectBoxInst(ProjectBoxInst *Inst) {
   // If it's a projection of a promoted parameter, drop the instruction.
   // Its uses will be replaced by the promoted address.
-  // and replace its uses with
-  if (PromotedParameters.count(Inst->getOperand()))
+  if (OrigPromotedParameters.count(Inst->getOperand())) {
+    auto *origArg = cast<SILFunctionArgument>(Inst->getOperand());
+    recordFoldedValue(Inst, NewPromotedArgs[origArg->getIndex()]);
     return;
-  
+  }
+
   SILCloner<PromotedParamCloner>::visitProjectBoxInst(Inst);
 }
 

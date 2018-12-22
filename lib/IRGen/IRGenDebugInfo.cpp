@@ -58,6 +58,11 @@
 using namespace swift;
 using namespace irgen;
 
+llvm::cl::opt<bool> VerifyLineTable(
+    "verify-linetable", llvm::cl::init(false),
+    llvm::cl::desc(
+        "Verify that the debug locations within one scope are contiguous."));
+
 namespace {
 using TrackingDIRefMap =
     llvm::DenseMap<const llvm::MDString *, llvm::TrackingMDNodeRef>;
@@ -105,6 +110,20 @@ class IRGenDebugInfoImpl : public IRGenDebugInfo {
   SmallVector<std::pair<SILLocation::DebugLoc, const SILDebugScope *>, 8>
       LocationStack;
 
+#ifndef NDEBUG
+  using UUSTuple = std::pair<std::pair<unsigned, unsigned>, StringRef>;
+  struct DebugLocKey : public UUSTuple {
+    DebugLocKey(SILLocation::DebugLoc DL)
+        : UUSTuple({{DL.Line, DL.Column}, DL.Filename}) {}
+    inline bool operator==(const SILLocation::DebugLoc &DL) const {
+      return first.first == DL.Line && first.second == DL.Column &&
+             second.equals(DL.Filename);
+    }
+  };
+  llvm::DenseSet<UUSTuple> PreviousLineEntries;
+  SILLocation::DebugLoc PreviousDebugLoc;
+#endif
+  
 public:
   IRGenDebugInfoImpl(const IRGenOptions &Opts, ClangImporter &CI,
                      IRGenModule &IGM, llvm::Module &M,
@@ -307,11 +326,15 @@ private:
     }
     return true;
   }
+
+  /// Assert that within one lexical block, each location is only visited once.
+  bool lineEntryIsSane(SILLocation::DebugLoc DL, const SILDebugScope *DS);
+
 #endif
 
   llvm::DIFile *getOrCreateFile(StringRef Filename) {
     if (Filename.empty())
-      return MainFile;
+      Filename = SILLocation::getCompilerGeneratedDebugLoc().Filename;
 
     // Look in the cache first.
     auto CachedFile = DIFileCache.find(Filename);
@@ -338,6 +361,7 @@ private:
     StringRef File = llvm::sys::path::filename(Filename);
     llvm::SmallString<512> Path(Filename);
     llvm::sys::path::remove_filename(Path);
+    llvm::sys::path::remove_dots(Path);
     llvm::DIFile *F = DBuilder.createFile(DebugPrefixMap.remapPath(File),
                                           DebugPrefixMap.remapPath(Path));
 
@@ -364,9 +388,6 @@ private:
           break;
         case AccessorKind::DidSet:
           Kind = ".didset";
-          break;
-        case AccessorKind::MaterializeForSet:
-          Kind = ".materialize";
           break;
         case AccessorKind::Address:
           Kind = ".addressor";
@@ -479,8 +500,6 @@ private:
                            SILType type, DeclContext *DeclCtx,
                            GenericEnvironment *GE) {
     auto RealType = type.getASTType();
-    if (type.isAddress())
-      RealType = CanInOutType::get(RealType);
     auto DbgTy = DebugTypeInfo::getFromTypeInfo(DeclCtx, GE, RealType,
                                                 IGM.getTypeInfo(type));
     Parameters.push_back(getOrCreateType(DbgTy));
@@ -630,7 +649,7 @@ private:
 
     Mangle::ASTMangler Mangler;
     std::string Name = Mangler.mangleTypeForDebugger(
-        Ty, DbgTy.getDeclContext(), DbgTy.getGenericEnvironment());
+        Ty, DbgTy.getDeclContext());
     return BumpAllocatedString(Name);
   }
 
@@ -1005,6 +1024,12 @@ private:
       break;
     }
 
+    case TypeKind::BuiltinIntegerLiteral: {
+      Encoding = llvm::dwarf::DW_ATE_unsigned; // ?
+      SizeInBits = getSizeOfBasicType(DbgTy);
+      break;
+    }
+
     case TypeKind::BuiltinFloat: {
       auto *FloatTy = BaseTy->castTo<BuiltinFloatType>();
       // Assuming that the bitwidth and FloatTy->getFPKind() are identical.
@@ -1165,26 +1190,17 @@ private:
                                   AlignInBits, Flags, MangledName);
     }
 
-    case TypeKind::InOut: {
-      // This is an inout type. Naturally we would be emitting them as
-      // DW_TAG_reference_type types, but LLDB can deal better with
-      // pointer-sized struct that has the appropriate mangled name.
-      auto ObjectTy = BaseTy->castTo<InOutType>()->getObjectType();
-      auto Name = MangledName;
-      if (auto *Decl = ObjectTy->getAnyNominal())
-        Name = Decl->getName().str();
-      if (Opts.DebugInfoLevel > IRGenDebugInfoLevel::ASTTypes) {
-        auto DT = getOrCreateDesugaredType(ObjectTy, DbgTy);
-        return createPointerSizedStruct(Scope, Name, DT, File, 0, Flags,
-                                        MangledName);
-      } else
-        return createOpaqueStruct(Scope, Name, File, 0, SizeInBits, AlignInBits,
-                                  Flags, MangledName);
-    }
+    case TypeKind::InOut:
+      break;
 
-    case TypeKind::Archetype: {
+    case TypeKind::PrimaryArchetype:
+    case TypeKind::OpenedArchetype:
+    case TypeKind::NestedArchetype: {
       auto *Archetype = BaseTy->castTo<ArchetypeType>();
-      auto L = getDebugLoc(*this, Archetype->getAssocType());
+      AssociatedTypeDecl *assocType = nullptr;
+      if (auto nested = dyn_cast<NestedArchetypeType>(Archetype))
+        assocType = nested->getAssocType();
+      auto L = getDebugLoc(*this, assocType);
       auto Superclass = Archetype->getSuperclass();
       auto DerivedFrom = Superclass.isNull()
                              ? nullptr
@@ -1357,10 +1373,6 @@ private:
     case TypeKind::SILBlockStorage: // Not supported at all.
     case TypeKind::SILBox:
       return false;
-    case TypeKind::InOut: {
-      auto *ObjectTy = Ty->castTo<InOutType>()->getObjectType().getPointer();
-      return canMangle(ObjectTy);
-    }
     default:
       return true;
     }
@@ -1567,6 +1579,25 @@ void IRGenDebugInfoImpl::finalize() {
   DBuilder.finalize();
 }
 
+#ifndef NDEBUG
+bool IRGenDebugInfoImpl::lineEntryIsSane(SILLocation::DebugLoc DL,
+                                         const SILDebugScope *DS) {
+  // All bets are off for optimized code.
+  if (!VerifyLineTable || Opts.shouldOptimize())
+    return true;
+  // We entered a new lexical block.
+  if (DS != LastScope)
+    PreviousLineEntries.clear();
+  if (DL.Line == 0 || DL == PreviousDebugLoc)
+    return true;
+  // Save the last non-zero line entry.
+  PreviousDebugLoc = DL;
+  auto ItNew = PreviousLineEntries.insert(DebugLocKey(DL));
+  // Return true iff DL was not yet in PreviousLineEntries.
+  return ItNew.second;
+}
+#endif
+
 void IRGenDebugInfoImpl::setCurrentLoc(IRBuilder &Builder,
                                        const SILDebugScope *DS,
                                        SILLocation Loc) {
@@ -1615,9 +1646,8 @@ void IRGenDebugInfoImpl::setCurrentLoc(IRBuilder &Builder,
   }
 
   // FIXME: Enable this assertion.
-  // assert(lineNumberIsSane(Builder, L.Line) &&
-  //       "-Onone, but line numbers are not monotonically increasing within
-  //       bb");
+  assert(lineEntryIsSane(L, DS) &&
+         "non-contiguous debug location in same scope at -Onone");
   LastDebugLoc = L;
   LastScope = DS;
 
@@ -2091,11 +2121,11 @@ SILLocation::DebugLoc IRGenDebugInfoImpl::decodeSourceLoc(SourceLoc SL) {
 
 } // anonymous namespace
 
-IRGenDebugInfo *IRGenDebugInfo::createIRGenDebugInfo(
+std::unique_ptr<IRGenDebugInfo> IRGenDebugInfo::createIRGenDebugInfo(
     const IRGenOptions &Opts, ClangImporter &CI, IRGenModule &IGM,
     llvm::Module &M, StringRef MainOutputFilenameForDebugInfo) {
-  return new IRGenDebugInfoImpl(Opts, CI, IGM, M,
-                                MainOutputFilenameForDebugInfo);
+  return llvm::make_unique<IRGenDebugInfoImpl>(Opts, CI, IGM, M,
+                                               MainOutputFilenameForDebugInfo);
 }
 
 

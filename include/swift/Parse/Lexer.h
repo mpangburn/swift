@@ -99,7 +99,7 @@ class Lexer {
 
   Token NextToken;
   
-  /// \brief This is true if we're lexing a .sil file instead of a .swift
+  /// This is true if we're lexing a .sil file instead of a .swift
   /// file.  This enables the 'sil' keyword.
   const bool InSILMode;
 
@@ -143,7 +143,7 @@ class Lexer {
   void initialize(unsigned Offset, unsigned EndOffset);
 
 public:
-  /// \brief Create a normal lexer that scans the whole source buffer.
+  /// Create a normal lexer that scans the whole source buffer.
   ///
   /// \param Options - the language options under which to lex.  By
   ///   design, language options only affect whether a token is valid
@@ -163,14 +163,14 @@ public:
       CommentRetentionMode RetainComments = CommentRetentionMode::None,
       TriviaRetentionMode TriviaRetention = TriviaRetentionMode::WithoutTrivia);
 
-  /// \brief Create a lexer that scans a subrange of the source buffer.
+  /// Create a lexer that scans a subrange of the source buffer.
   Lexer(const LangOptions &Options, const SourceManager &SourceMgr,
         unsigned BufferID, DiagnosticEngine *Diags, bool InSILMode,
         HashbangMode HashbangAllowed, CommentRetentionMode RetainComments,
         TriviaRetentionMode TriviaRetention, unsigned Offset,
         unsigned EndOffset);
 
-  /// \brief Create a sub-lexer that lexes from the same buffer, but scans
+  /// Create a sub-lexer that lexes from the same buffer, but scans
   /// a subrange of the buffer.
   ///
   /// \param Parent the parent lexer that scans the whole buffer
@@ -178,7 +178,7 @@ public:
   /// \param EndState end of the subrange
   Lexer(Lexer &Parent, State BeginState, State EndState);
 
-  /// \brief Returns true if this lexer will produce a code completion token.
+  /// Returns true if this lexer will produce a code completion token.
   bool isCodeCompletion() const {
     return CodeCompletionPtr != nullptr;
   }
@@ -220,12 +220,12 @@ public:
   /// actually lexing it.
   const Token &peekNextToken() const { return NextToken; }
 
-  /// \brief Returns the lexer state for the beginning of the given token
+  /// Returns the lexer state for the beginning of the given token
   /// location. After restoring the state, lexer will return this token and
   /// continue from there.
   State getStateForBeginningOfTokenLoc(SourceLoc Loc) const;
 
-  /// \brief Returns the lexer state for the beginning of the given token.
+  /// Returns the lexer state for the beginning of the given token.
   /// After restoring the state, lexer will return this token and continue from
   /// there.
   State getStateForBeginningOfToken(const Token &Tok,
@@ -251,7 +251,7 @@ public:
     return SourceMgr.findBufferContainingLoc(State.Loc) == getBufferID();
   }
 
-  /// \brief Restore the lexer state to a given one, that can be located either
+  /// Restore the lexer state to a given one, that can be located either
   /// before or after the current position.
   void restoreState(State S, bool enableDiagnostics = false) {
     assert(S.isValid());
@@ -268,7 +268,7 @@ public:
         LeadingTrivia = std::move(*LTrivia);
   }
 
-  /// \brief Restore the lexer state to a given state that is located before
+  /// Restore the lexer state to a given state that is located before
   /// current position.
   void backtrackToState(State S) {
     assert(getBufferPtrForSourceLoc(S.Loc) <= CurPtr &&
@@ -276,7 +276,7 @@ public:
     restoreState(S);
   }
 
-  /// \brief Retrieve the Token referred to by \c Loc.
+  /// Retrieve the Token referred to by \c Loc.
   ///
   /// \param SM The source manager in which the given source location
   /// resides.
@@ -285,7 +285,7 @@ public:
   static Token getTokenAtLocation(const SourceManager &SM, SourceLoc Loc);
 
 
-  /// \brief Retrieve the source location that points just past the
+  /// Retrieve the source location that points just past the
   /// end of the token referred to by \c Loc.
   ///
   /// \param SM The source manager in which the given source location
@@ -294,7 +294,7 @@ public:
   /// \param Loc The source location of the beginning of a token.
   static SourceLoc getLocForEndOfToken(const SourceManager &SM, SourceLoc Loc);
 
-  /// \brief Convert a SourceRange to the equivalent CharSourceRange
+  /// Convert a SourceRange to the equivalent CharSourceRange
   ///
   /// \param SM The source manager in which the given source range
   /// resides.
@@ -342,16 +342,16 @@ public:
   static StringRef getIndentationForLine(SourceManager &SM, SourceLoc Loc,
                                          StringRef *ExtraIndentation = nullptr);
 
-  /// \brief Determines if the given string is a valid non-operator
+  /// Determines if the given string is a valid non-operator
   /// identifier, without escaping characters.
   static bool isIdentifier(StringRef identifier);
 
-  /// \brief Determine the token kind of the string, given that it is a valid
+  /// Determine the token kind of the string, given that it is a valid
   /// non-operator identifier. Return tok::identifier if the string is not a
   /// reserved word.
   static tok kindOfIdentifier(StringRef Str, bool InSILMode);
 
-  /// \brief Determines if the given string is a valid operator identifier,
+  /// Determines if the given string is a valid operator identifier,
   /// without escaping characters.
   static bool isOperator(StringRef string);
 
@@ -364,12 +364,13 @@ public:
     enum : char { Literal, Expr } Kind;
     // Loc+Length for the segment inside the string literal, without quotes.
     SourceLoc Loc;
-    unsigned Length, IndentToStrip;
+    unsigned Length, IndentToStrip, CustomDelimiterLen;
     bool IsFirstSegment, IsLastSegment;
 
     static StringSegment getLiteral(SourceLoc Loc, unsigned Length,
                                     bool IsFirstSegment, bool IsLastSegment,
-                                    unsigned IndentToStrip) {
+                                    unsigned IndentToStrip,
+                                    unsigned CustomDelimiterLen) {
       StringSegment Result;
       Result.Kind = Literal;
       Result.Loc = Loc;
@@ -377,6 +378,7 @@ public:
       Result.IsFirstSegment = IsFirstSegment;
       Result.IsLastSegment = IsLastSegment;
       Result.IndentToStrip = IndentToStrip;
+      Result.CustomDelimiterLen = CustomDelimiterLen;
       return Result;
     }
     
@@ -388,6 +390,7 @@ public:
       Result.IsFirstSegment = false;
       Result.IsLastSegment = false;
       Result.IndentToStrip = 0;
+      Result.CustomDelimiterLen = 0;
       return Result;
     }
 
@@ -396,24 +399,53 @@ public:
     }
 
   };
-  
-  /// \brief Compute the bytes that the actual string literal should codegen to.
+
+  /// Implementation of getEncodedStringSegment. Note that \p Str must support
+  /// reading one byte past the end.
+  static StringRef getEncodedStringSegmentImpl(StringRef Str,
+                                               SmallVectorImpl<char> &Buffer,
+                                               bool IsFirstSegment,
+                                               bool IsLastSegment,
+                                               unsigned IndentToStrip,
+                                               unsigned CustomDelimiterLen);
+
+  /// Compute the bytes that the actual string literal should codegen to.
   /// If a copy needs to be made, it will be allocated out of the provided
-  /// Buffer.
+  /// \p Buffer.
+  StringRef getEncodedStringSegment(StringSegment Segment,
+                                    SmallVectorImpl<char> &Buffer) const {
+    return getEncodedStringSegmentImpl(
+        StringRef(getBufferPtrForSourceLoc(Segment.Loc), Segment.Length),
+        Buffer, Segment.IsFirstSegment, Segment.IsLastSegment,
+        Segment.IndentToStrip, Segment.CustomDelimiterLen);
+  }
+
+  /// Given a string encoded with escapes like a string literal, compute
+  /// the byte content.
+  ///
+  /// If a copy needs to be made, it will be allocated out of the provided
+  /// \p Buffer.
   static StringRef getEncodedStringSegment(StringRef Str,
                                            SmallVectorImpl<char> &Buffer,
                                            bool IsFirstSegment = false,
                                            bool IsLastSegment = false,
-                                           unsigned IndentToStrip = 0);
-  StringRef getEncodedStringSegment(StringSegment Segment,
-                                    SmallVectorImpl<char> &Buffer) const {
-    return getEncodedStringSegment(
-        StringRef(getBufferPtrForSourceLoc(Segment.Loc), Segment.Length),
-        Buffer, Segment.IsFirstSegment, Segment.IsLastSegment,
-        Segment.IndentToStrip);
+                                           unsigned IndentToStrip = 0,
+                                           unsigned CustomDelimiterLen = 0) {
+    SmallString<128> TerminatedStrBuf(Str);
+    TerminatedStrBuf.push_back('\0');
+    StringRef TerminatedStr = StringRef(TerminatedStrBuf).drop_back();
+    StringRef Result = getEncodedStringSegmentImpl(TerminatedStr, Buffer,
+                                                   IsFirstSegment,
+                                                   IsLastSegment,
+                                                   IndentToStrip,
+                                                   CustomDelimiterLen);
+    if (Result == TerminatedStr)
+      return Str;
+    assert(Result.data() == Buffer.data());
+    return Result;
   }
 
-  /// \brief Given a string literal token, separate it into string/expr segments
+  /// Given a string literal token, separate it into string/expr segments
   /// of a potentially interpolated string.
   static void getStringLiteralSegments(
       const Token &Str,
@@ -474,8 +506,10 @@ private:
     return diagnose(Loc, Diagnostic(DiagID, std::forward<ArgTypes>(Args)...));
   }
 
-  void formToken(tok Kind, const char *TokStart, bool MultilineString = false);
+  void formToken(tok Kind, const char *TokStart);
   void formEscapedIdentifierToken(const char *TokStart);
+  void formStringLiteralToken(const char *TokStart, bool IsMultilineString,
+                              unsigned CustomDelimiterLen);
 
   /// Advance to the end of the line.
   /// If EatNewLine is true, CurPtr will be at end of newline character.
@@ -498,10 +532,10 @@ private:
   void lexTrivia(syntax::Trivia &T, bool IsForTrailingTrivia);
   static unsigned lexUnicodeEscape(const char *&CurPtr, Lexer *Diags);
 
-  unsigned lexCharacter(const char *&CurPtr,
-                        char StopQuote, bool EmitDiagnostics,
-                        bool MultilineString = false);
-  void lexStringLiteral();
+  unsigned lexCharacter(const char *&CurPtr, char StopQuote,
+                        bool EmitDiagnostics, bool IsMultilineString = false,
+                        unsigned CustomDelimiterLen = 0);
+  void lexStringLiteral(unsigned CustomDelimiterLen = 0);
   void lexEscapedIdentifier();
 
   void tryLexEditorPlaceholder();

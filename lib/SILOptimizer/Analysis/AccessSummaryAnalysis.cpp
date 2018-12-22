@@ -227,8 +227,8 @@ void AccessSummaryAnalysis::processPartialApply(FunctionInfo *callerInfo,
 
   // Make sure the partial_apply is not calling the result of another
   // partial_apply.
-  assert(isa<FunctionRefInst>(apply->getCallee()) &&
-         "Noescape partial apply of non-functionref?");
+  assert(isa<FunctionRefBaseInst>(apply->getCallee())
+         && "Noescape partial apply of non-functionref?");
 
   assert(llvm::all_of(apply->getUses(),
                       hasExpectedUsesOfNoEscapePartialApply) &&
@@ -466,8 +466,7 @@ AccessSummaryAnalysis::getOrCreateSummary(SILFunction *fn) {
 void AccessSummaryAnalysis::AccessSummaryAnalysis::invalidate() {
   FunctionInfos.clear();
   Allocator.DestroyAll();
-  delete SubPathTrie;
-  SubPathTrie = new IndexTrieNode();
+  SubPathTrie.reset(new IndexTrieNode());
 }
 
 void AccessSummaryAnalysis::invalidate(SILFunction *F, InvalidationKind K) {
@@ -525,7 +524,7 @@ getSingleAddressProjectionUser(SingleValueInstruction *I) {
 
 const IndexTrieNode *
 AccessSummaryAnalysis::findSubPathAccessed(BeginAccessInst *BAI) {
-  IndexTrieNode *SubPath = SubPathTrie;
+  IndexTrieNode *SubPath = getSubPathTrieRoot();
 
   // For each single-user projection of BAI, construct or get a node
   // from the trie representing the index of the field or tuple element

@@ -265,7 +265,7 @@ static OptionalTypeKind getResultOptionality(
   return OTK_ImplicitlyUnwrappedOptional;
 }
 
-/// \brief Determine whether the given name is reserved for Swift.
+/// Determine whether the given name is reserved for Swift.
 static bool isSwiftReservedName(StringRef name) {
   tok kind = Lexer::kindOfIdentifier(name, /*InSILMode=*/false);
   return (kind != tok::identifier);
@@ -797,7 +797,7 @@ static bool shouldImportAsInitializer(const clang::ObjCMethodDecl *method,
 static bool omitNeedlessWordsInFunctionName(
     StringRef &baseName, SmallVectorImpl<StringRef> &argumentNames,
     ArrayRef<const clang::ParmVarDecl *> params, clang::QualType resultType,
-    const clang::DeclContext *dc, const llvm::SmallBitVector &nonNullArgs,
+    const clang::DeclContext *dc, const SmallBitVector &nonNullArgs,
     Optional<unsigned> errorParamIndex, bool returnsSelf, bool isInstanceMethod,
     NameImporter &nameImporter) {
   clang::ASTContext &clangCtx = nameImporter.getClangContext();

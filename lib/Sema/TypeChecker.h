@@ -36,14 +36,15 @@
 namespace swift {
 
 class GenericSignatureBuilder;
-class GenericTypeResolver;
 class NominalTypeDecl;
 class NormalProtocolConformance;
 class TopLevelContext;
 class TypeChecker;
+class TypeResolution;
+class TypeResolutionOptions;
 class TypoCorrectionResults;
 class ExprPattern;
-class SynthesizedFunction;
+enum class TypeResolutionStage : uint8_t;
 
 namespace constraints {
   enum class ConstraintKind : char;
@@ -52,7 +53,7 @@ namespace constraints {
   class Solution;
 }
 
-/// \brief A mapping from substitutable types to the protocol-conformance
+/// A mapping from substitutable types to the protocol-conformance
 /// mappings for those types.
 using ConformanceMap =
     llvm::DenseMap<SubstitutableType *, SmallVector<ProtocolConformance *, 2>>;
@@ -182,7 +183,7 @@ public:
   /// Add a result to the set of results.
   void addResult(LookupTypeResultEntry result) { Results.push_back(result); }
 
-  /// \brief Determine whether this result set is ambiguous.
+  /// Determine whether this result set is ambiguous.
   bool isAmbiguous() const {
     return Results.size() > 1;
   }
@@ -256,15 +257,12 @@ enum class TypeCheckExprFlags {
   /// and so we should not visit bodies of non-single expression closures.
   SkipMultiStmtClosures = 0x40,
 
-  /// If set, don't apply a solution.
-  SkipApplyingSolution = 0x100,
-
   /// This is an inout yield.
-  IsInOutYield = 0x200,
+  IsInOutYield = 0x100,
 
-  /// If set, a conversion constraint should be specfied so that the result of
+  /// If set, a conversion constraint should be specified so that the result of
   /// the expression is an optional type.
-  ExpressionTypeMustBeOptional = 0x400,
+  ExpressionTypeMustBeOptional = 0x200,
 };
 
 using TypeCheckExprOptions = OptionSet<TypeCheckExprFlags>;
@@ -297,6 +295,8 @@ enum class NameLookupFlags {
   /// Whether to include results from outside the innermost scope that has a
   /// result.
   IncludeOuterResults = 0x20,
+  /// Whether to consider synonyms declared through @_implements().
+  IncludeAttributeImplements = 0x40,
 };
 
 /// A set of options that control name lookup.
@@ -456,243 +456,6 @@ enum class RequirementCheckResult {
   Success, Failure, SubstitutionFailure
 };
 
-/// Flags that describe the context of type checking a pattern or
-/// type.
-enum class TypeResolutionFlags : uint16_t {
-  /// Whether to allow unspecified types within a pattern.
-  AllowUnspecifiedTypes = 1 << 0,
-
-  /// Whether to allow unbound generic types.
-  AllowUnboundGenerics = 1 << 1,
-
-  /// Whether an unavailable protocol can be referenced.
-  AllowUnavailableProtocol = 1 << 2,
-
-  /// Whether we should allow references to unavailable types.
-  AllowUnavailable = 1 << 3,
-
-  /// Whether the given type can override the type of a typed pattern.
-  OverrideType = 1 << 4,
-
-  /// Whether we are validating the type for SIL.
-  // FIXME: Move this flag to TypeResolverContext.
-  SILType = 1 << 5,
-
-  /// Whether we are parsing a SIL file.  Not the same as SILType,
-  /// because the latter is not set if we're parsing an AST type.
-  SILMode = 1 << 6,
-
-  /// Whether this is a resolution based on a non-inferred type pattern.
-  FromNonInferredPattern = 1 << 7,
-
-  /// Whether this type resolution is guaranteed not to affect downstream files.
-  KnownNonCascadingDependency = 1 << 8,
-
-  /// Whether we are at the direct base of a type expression.
-  Direct = 1 << 9,
-
-  /// Whether we should not produce diagnostics if the type is invalid.
-  SilenceErrors = 1 << 10,
-};
-
-/// Type resolution contexts that require special handling.
-enum class TypeResolverContext : uint8_t {
-  /// No special type handling is required.
-  None,
-
-  /// Whether we are checking the parameter list of a function.
-  AbstractFunctionDecl,
-
-  /// Whether we are checking the parameter list of a subscript.
-  SubscriptDecl,
-
-  /// Whether we are checking the parameter list of a closure.
-  ClosureExpr,
-
-  /// Whether we are in the input type of a function, or under one level of
-  /// tuple type.  This is not set for multi-level tuple arguments.
-  /// See also: TypeResolutionFlags::Direct
-  FunctionInput,
-
-  /// Whether this is a variadic function input.
-  VariadicFunctionInput,
-
-  /// Whether we are in the result type of a function, including multi-level
-  /// tuple return values. See also: TypeResolutionFlags::Direct
-  FunctionResult,
-
-  /// Whether we are in the result type of a function body that is
-  /// known to produce dynamic Self.
-  DynamicSelfResult,
-
-  /// Whether we are in a protocol's where clause
-  ProtocolWhereClause,
-
-  /// Whether this is a pattern binding entry.
-  PatternBindingDecl,
-
-  /// Whether we are the variable type in a for/in statement.
-  ForEachStmt,
-
-  /// Whether we are binding an extension declaration, which limits
-  /// the lookup.
-  ExtensionBinding,
-
-  /// Whether this type is being used in an expression or local declaration.
-  ///
-  /// This affects what sort of dependencies are recorded when resolving the
-  /// type.
-  InExpression,
-
-  /// Whether this type is being used in a cast or coercion expression.
-  ExplicitCastExpr,
-
-  /// Whether this type is the value carried in an enum case.
-  EnumElementDecl,
-
-  /// Whether this is the payload subpattern of an enum pattern.
-  EnumPatternPayload,
-
-  /// Whether we are checking the underlying type of a typealias.
-  TypeAliasDecl,
-
-  /// Whether we are in a requirement of a generic declaration
-  GenericRequirement,
-
-  /// Whether we are in a type argument for an optional
-  ImmediateOptionalTypeArgument,
-
-  /// Whether this is the type of an editor placeholder.
-  EditorPlaceholderExpr,
-};
-
-/// Options that determine how type resolution should work.
-class TypeResolutionOptions {
-  using Context = TypeResolverContext;
-
-  // The "base" type resolution context. This never changes.
-  Context base = Context::None;
-  // The current type resolution context.
-  Context context = Context::None;
-  // TypeResolutionFlags
-  uint16_t flags = 0;
-  static_assert(sizeof(flags) == sizeof(TypeResolutionFlags),
-      "Flags size error");
-
-public:
-  ~TypeResolutionOptions() = default;
-  TypeResolutionOptions(const TypeResolutionOptions &) = default;
-  TypeResolutionOptions(TypeResolutionOptions &&) = default;
-  TypeResolutionOptions &operator =(const TypeResolutionOptions &) = default;
-  TypeResolutionOptions &operator =(TypeResolutionOptions &&) = default;
-
-  // NOTE: Use either setContext() or explicit construction and assignment.
-  void operator =(const Context &) = delete;
-  void operator =(Context &&) = delete;
-
-  // NOTE: "None" might be more permissive than one wants, therefore no
-  // reasonable default context is possible.
-  TypeResolutionOptions() = delete;
-
-  TypeResolutionOptions(Context context) : base(context), context(context),
-      flags(unsigned(TypeResolutionFlags::Direct)) {}
-  // Helper forwarding constructors:
-  TypeResolutionOptions(llvm::NoneType) : TypeResolutionOptions(Context::None){}
-
-  /// Test the current type resolution base context.
-  bool hasBase(Context context) const { return base == context; }
-
-  /// Get the base type resolution context.
-  Context getBaseContext() const { return base; }
-
-  /// Test the current type resolution context.
-  bool is(Context context) const { return this->context == context; }
-
-  /// Get the current type resolution context.
-  Context getContext() const { return context; }
-  /// Set the current type resolution context.
-  void setContext(Context newContext) {
-    context = newContext;
-    flags &= ~unsigned(TypeResolutionFlags::Direct);
-  }
-  void setContext(llvm::NoneType) { setContext(Context::None); }
-
-  /// Get the current flags.
-  TypeResolutionFlags getFlags() const { return TypeResolutionFlags(flags); }
-
-  /// Is this type resolution context an expression.
-  bool isAnyExpr() const {
-    switch (base) {
-    case Context::InExpression:
-    case Context::ExplicitCastExpr:
-    case Context::ForEachStmt:
-    case Context::PatternBindingDecl:
-    case Context::EditorPlaceholderExpr:
-    case Context::ClosureExpr:
-      return true;
-    case Context::None:
-    case Context::FunctionInput:
-    case Context::VariadicFunctionInput:
-    case Context::FunctionResult:
-    case Context::DynamicSelfResult:
-    case Context::ProtocolWhereClause:
-    case Context::ExtensionBinding:
-    case Context::SubscriptDecl:
-    case Context::EnumElementDecl:
-    case Context::EnumPatternPayload:
-    case Context::TypeAliasDecl:
-    case Context::GenericRequirement:
-    case Context::ImmediateOptionalTypeArgument:
-    case Context::AbstractFunctionDecl:
-      return false;
-    }
-  }
-
-  /// Determine whether all of the given options are set.
-  bool contains(TypeResolutionFlags set) const {
-    return !static_cast<bool>(unsigned(set) & ~unsigned(flags));
-  }
-
-  /// Produce type resolution options with additional flags.
-  friend TypeResolutionOptions operator|(TypeResolutionOptions lhs,
-                                         TypeResolutionFlags rhs) {
-    return lhs |= rhs;
-  }
-
-  /// Merge additional flags into type resolution options.
-  friend TypeResolutionOptions &operator|=(TypeResolutionOptions &lhs,
-                                           TypeResolutionFlags rhs) {
-    lhs.flags |= unsigned(rhs);
-    return lhs;
-  }
-
-  /// Test whether any given flag is set in the type resolution options.
-  friend bool operator&(TypeResolutionOptions lhs, TypeResolutionFlags rhs) {
-    return lhs.flags & unsigned(rhs);
-  }
-
-  /// Produce type resolution options with removed flags.
-  friend TypeResolutionOptions operator-(TypeResolutionOptions lhs,
-                                         TypeResolutionFlags rhs) {
-    return lhs -= rhs;
-  }
-
-  /// Remove the flags from the type resolution options.
-  friend TypeResolutionOptions &operator-=(TypeResolutionOptions &lhs,
-                                           TypeResolutionFlags rhs) {
-    lhs.flags &= ~unsigned(rhs);
-    return lhs;
-  }
-  /// Strip the contextual options from the given type resolution options.
-  inline TypeResolutionOptions withoutContext(bool preserveSIL = false) const {
-    auto copy = *this;
-    copy.setContext(None);
-    // FIXME: Move SILType to TypeResolverContext.
-    if (!preserveSIL) copy -= TypeResolutionFlags::SILType;
-    return copy;
-  }
-};
-
 /// Flags that control protocol conformance checking.
 enum class ConformanceCheckFlags {
   /// Whether we're performing the check from within an expression.
@@ -754,7 +517,7 @@ public:
   ASTContext &Context;
   DiagnosticEngine &Diags;
 
-  /// \brief The list of function definitions we've encountered.
+  /// The list of function definitions we've encountered.
   std::vector<AbstractFunctionDecl *> definedFunctions;
 
   /// Declarations that need their conformances checked.
@@ -778,9 +541,6 @@ public:
   /// from the \c DeclsToFinalize set.
   unsigned NextDeclToFinalize = 0;
 
-  /// The list of functions that need to have their bodies synthesized.
-  llvm::MapVector<FuncDecl*, SynthesizedFunction> FunctionsToSynthesize;
-
   /// The list of protocols that need their requirement signatures computed,
   /// because they were first validated by validateDeclForNameLookup(),
   /// which skips this step.
@@ -790,12 +550,14 @@ public:
   SmallVector<NominalTypeDecl*, 8> DelayedCircularityChecks;
 
   // Caches whether a given declaration is "as specialized" as another.
-  llvm::DenseMap<std::pair<ValueDecl*, ValueDecl*>, bool> 
-    specializedOverloadComparisonCache;
-  
+  llvm::DenseMap<std::tuple<ValueDecl *, ValueDecl *,
+                            /*isDynamicOverloadComparison*/ unsigned>,
+                 bool>
+      specializedOverloadComparisonCache;
+
   /// A list of closures for the most recently type-checked function, which we
   /// will need to compute captures for.
-  std::vector<AnyFunctionRef> ClosuresWithUncomputedCaptures;
+  std::vector<AbstractClosureExpr *> ClosuresWithUncomputedCaptures;
 
   /// Local functions that have been captured before their definitions.
   ///
@@ -956,9 +718,16 @@ private:
   /// \returns NULL if the constructed expression does not typecheck.
   Expr* constructCallToSuperInit(ConstructorDecl *ctor, ClassDecl *ClDecl);
 
+  TypeChecker(ASTContext &Ctx);
+  friend class ASTContext;
+
 public:
-  TypeChecker(ASTContext &Ctx) : TypeChecker(Ctx, Ctx.Diags) { }
-  TypeChecker(ASTContext &Ctx, DiagnosticEngine &Diags);
+  /// Create a new type checker instance for the given ASTContext, if it
+  /// doesn't already have one.
+  ///
+  /// \returns a reference to the type vchecker.
+  static TypeChecker &createForContext(ASTContext &ctx);
+
   TypeChecker(const TypeChecker&) = delete;
   TypeChecker& operator=(const TypeChecker&) = delete;
   ~TypeChecker();
@@ -1046,9 +815,9 @@ public:
     return Diags.diagnose(std::forward<ArgTypes>(Args)...);
   }
 
-  Type getArraySliceType(SourceLoc loc, Type elementType);
-  Type getDictionaryType(SourceLoc loc, Type keyType, Type valueType);
-  Type getOptionalType(SourceLoc loc, Type elementType);
+  static Type getArraySliceType(SourceLoc loc, Type elementType);
+  static Type getDictionaryType(SourceLoc loc, Type keyType, Type valueType);
+  static Type getOptionalType(SourceLoc loc, Type elementType);
   Type getUnsafePointerType(SourceLoc loc, Type pointeeType);
   Type getUnsafeMutablePointerType(SourceLoc loc, Type pointeeType);
   Type getStringType(DeclContext *dc);
@@ -1056,24 +825,22 @@ public:
   Type getIntType(DeclContext *dc);
   Type getInt8Type(DeclContext *dc);
   Type getUInt8Type(DeclContext *dc);
-  Type getMaxIntegerType(DeclContext *dc);
   Type getNSObjectType(DeclContext *dc);
   Type getObjCSelectorType(DeclContext *dc);
   Type getExceptionType(DeclContext *dc, SourceLoc loc);
   
-  /// \brief Try to resolve an IdentTypeRepr, returning either the referenced
+  /// Try to resolve an IdentTypeRepr, returning either the referenced
   /// Type or an ErrorType in case of error.
-  Type resolveIdentifierType(DeclContext *DC,
-                             IdentTypeRepr *IdType,
-                             TypeResolutionOptions options,
-                             GenericTypeResolver *resolver);
+  static Type resolveIdentifierType(TypeResolution resolution,
+                                    IdentTypeRepr *IdType,
+                                    TypeResolutionOptions options);
 
   /// Bind an UnresolvedDeclRefExpr by performing name lookup and
   /// returning the resultant expression.  Context is the DeclContext used
   /// for the lookup.
   Expr *resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *Context);
 
-  /// \brief Validate the given type.
+  /// Validate the given type.
   ///
   /// Type validation performs name binding, checking of generic arguments,
   /// and so on to determine whether the given type is well-formed and can
@@ -1082,17 +849,13 @@ public:
   /// \param Loc The type (with source location information) to validate.
   /// If the type has already been validated, returns immediately.
   ///
-  /// \param DC The context that the type appears in.
+  /// \param resolution The type resolution being performed.
   ///
   /// \param options Options that alter type resolution.
   ///
-  /// \param resolver A resolver for generic types. If none is supplied, this
-  /// routine will create a \c GenericTypeToArchetypeResolver to use.
-  ///
   /// \returns true if type validation failed, or false otherwise.
-  bool validateType(TypeLoc &Loc, DeclContext *DC,
-                    TypeResolutionOptions options = None,
-                    GenericTypeResolver *resolver = nullptr);
+  bool validateType(TypeLoc &Loc, TypeResolution resolution,
+                    TypeResolutionOptions options);
 
   /// Check for unsupported protocol types in the given declaration.
   void checkUnsupportedProtocolType(Decl *decl);
@@ -1100,28 +863,17 @@ public:
   /// Check for unsupported protocol types in the given statement.
   void checkUnsupportedProtocolType(Stmt *stmt);
 
+  /// Check for unsupported protocol types in the given generic requirement
+  /// list.
+  void checkUnsupportedProtocolType(TrailingWhereClause *whereClause);
+
+  /// Check for unsupported protocol types in the given generic requirement
+  /// list.
+  void checkUnsupportedProtocolType(GenericParamList *genericParams);
+
   /// Expose TypeChecker's handling of GenericParamList to SIL parsing.
   GenericEnvironment *handleSILGenericParams(GenericParamList *genericParams,
                                              DeclContext *DC);
-
-  /// \brief Resolves a TypeRepr to a type.
-  ///
-  /// Performs name binding, checking of generic arguments, and so on in order
-  /// to create a well-formed type.
-  ///
-  /// \param TyR The type representation to check.
-  ///
-  /// \param DC The context that the type appears in.
-  ///
-  /// \param options Options that alter type resolution.
-  ///
-  /// \param resolver A resolver for generic types. If none is supplied, this
-  /// routine will create a \c GenericTypeToArchetypeResolver to use.
-  ///
-  /// \returns a well-formed type or an ErrorType in case of an error.
-  Type resolveType(TypeRepr *TyR, DeclContext *DC,
-                   TypeResolutionOptions options,
-                   GenericTypeResolver *resolver = nullptr);
 
   void validateDecl(ValueDecl *D);
   void validateDecl(OperatorDecl *decl);
@@ -1160,17 +912,15 @@ public:
   /// the declaration context from which name lookup started.
   ///
   /// \param typeDecl The type declaration found by name lookup.
-  /// \param fromDC The declaration context in which the name lookup occurred.
   /// \param isSpecialized Whether the type will have generic arguments applied.
-  /// \param resolver The resolver for generic types.
+  /// \param resolution The resolution to perform.
   ///
   /// \returns the resolved type.
-  Type resolveTypeInContext(TypeDecl *typeDecl,
-                            DeclContext *foundDC,
-                            DeclContext *fromDC,
-                            TypeResolutionOptions options,
-                            bool isSpecialized,
-                            GenericTypeResolver *resolver = nullptr);
+  static Type resolveTypeInContext(TypeDecl *typeDecl,
+                                   DeclContext *foundDC,
+                                   TypeResolution resolution,
+                                   TypeResolutionOptions options,
+                                   bool isSpecialized);
 
   /// Apply generic arguments to the given type.
   ///
@@ -1180,20 +930,19 @@ public:
   ///
   /// \param type The generic type to which to apply arguments.
   /// \param loc The source location for diagnostic reporting.
-  /// \param dc The context where the arguments are applied.
+  /// \param resolution The type resolution to perform.
   /// \param generic The arguments to apply with the angle bracket range for
   /// diagnostics.
   /// \param options The type resolution context.
-  /// \param resolver The generic type resolver.
   ///
   /// \returns A BoundGenericType bound to the given arguments, or null on
   /// error.
   ///
   /// \see applyUnboundGenericArguments
-  Type applyGenericArguments(Type type, SourceLoc loc,
-                             DeclContext *dc, GenericIdentTypeRepr *generic,
-                             TypeResolutionOptions options,
-                             GenericTypeResolver *resolver);
+  static Type applyGenericArguments(Type type, SourceLoc loc,
+                                    TypeResolution resolution,
+                                    GenericIdentTypeRepr *generic,
+                                    TypeResolutionOptions options);
 
   /// Apply generic arguments to the given type.
   ///
@@ -1204,21 +953,20 @@ public:
   /// \param unboundType The unbound generic type to which to apply arguments.
   /// \param decl The declaration of the type.
   /// \param loc The source location for diagnostic reporting.
-  /// \param dc The context where the arguments are applied.
+  /// \param resolution The type resolution.
   /// \param genericArgs The list of generic arguments to apply to the type.
-  /// \param resolver The generic type resolver.
   ///
   /// \returns A BoundGenericType bound to the given arguments, or null on
   /// error.
   ///
   /// \see applyGenericArguments
-  Type applyUnboundGenericArguments(UnboundGenericType *unboundType,
-                                    GenericTypeDecl *decl,
-                                    SourceLoc loc, DeclContext *dc,
-                                    ArrayRef<Type> genericArgs,
-                                    GenericTypeResolver *resolver);
+  static Type applyUnboundGenericArguments(UnboundGenericType *unboundType,
+                                           GenericTypeDecl *decl,
+                                           SourceLoc loc,
+                                           TypeResolution resolution,
+                                           ArrayRef<Type> genericArgs);
 
-  /// \brief Substitute the given base type into the type of the given nested type,
+  /// Substitute the given base type into the type of the given nested type,
   /// producing the effective type that the nested type will have.
   ///
   /// \param module The module in which the substitution will be performed.
@@ -1227,14 +975,10 @@ public:
   /// member.
   /// \param useArchetypes Whether to use context archetypes for outer generic
   /// parameters if the class is nested inside a generic function.
-  Type substMemberTypeWithBase(ModuleDecl *module, TypeDecl *member, Type baseTy,
-                              bool useArchetypes = true);
+  static Type substMemberTypeWithBase(ModuleDecl *module, TypeDecl *member,
+                                      Type baseTy, bool useArchetypes = true);
 
-  /// \brief Retrieve the superclass type of the given type, or a null type if
-  /// the type has no supertype.
-  Type getSuperClassOf(Type type);
-
-  /// \brief Determine whether one type is a subtype of another.
+  /// Determine whether one type is a subtype of another.
   ///
   /// \param t1 The potential subtype.
   /// \param t2 The potential supertype.
@@ -1242,17 +986,8 @@ public:
   ///
   /// \returns true if \c t1 is a subtype of \c t2.
   bool isSubtypeOf(Type t1, Type t2, DeclContext *dc);
-
-  /// \brief Determine whether one type is a subclass of another.
-  ///
-  /// \param t1 The potential subtype.
-  /// \param t2 The potential supertype.
-  /// \param dc The context of the check.
-  ///
-  /// \returns true if \c t1 is a subtype of \c t2.
-  bool isSubclassOf(Type t1, Type t2, DeclContext *dc);
   
-  /// \brief Determine whether one type is implicitly convertible to another.
+  /// Determine whether one type is implicitly convertible to another.
   ///
   /// \param t1 The potential source type of the conversion.
   ///
@@ -1267,7 +1002,7 @@ public:
   bool isConvertibleTo(Type t1, Type t2, DeclContext *dc,
                        bool *unwrappedIUO = nullptr);
 
-  /// \brief Determine whether one type is explicitly convertible to another,
+  /// Determine whether one type is explicitly convertible to another,
   /// i.e. using an 'as' expression.
   ///
   /// \param t1 The potential source type of the conversion.
@@ -1279,7 +1014,7 @@ public:
   /// \returns true if \c t1 can be explicitly converted to \c t2.
   bool isExplicitlyConvertibleTo(Type t1, Type t2, DeclContext *dc);
 
-  /// \brief Determine whether one type is bridged to another type.
+  /// Determine whether one type is bridged to another type.
   ///
   /// \param t1 The potential source type of the conversion.
   ///
@@ -1294,7 +1029,7 @@ public:
   bool isObjCBridgedTo(Type t1, Type t2, DeclContext *dc,
                        bool *unwrappedIUO = nullptr);
 
-  /// \brief Return true if performing a checked cast from one type to another
+  /// Return true if performing a checked cast from one type to another
   /// with the "as!" operator could possibly succeed.
   ///
   /// \param t1 The potential source type of the cast.
@@ -1307,7 +1042,7 @@ public:
   /// false if it will certainly fail, e.g. because the types are unrelated.
   bool checkedCastMaySucceed(Type t1, Type t2, DeclContext *dc);
 
-  /// \brief Determine whether a constraint of the given kind can be satisfied
+  /// Determine whether a constraint of the given kind can be satisfied
   /// by the two types.
   ///
   /// \param t1 The first type of the constraint.
@@ -1346,6 +1081,12 @@ public:
 
   bool typeCheckClosureBody(ClosureExpr *closure);
 
+  bool typeCheckTapBody(TapExpr *expr, DeclContext *DC);
+
+  Type typeCheckParameterDefault(Expr *&defaultValue, DeclContext *DC,
+                                 Type paramType, bool isAutoClosure = false,
+                                 bool canFail = true);
+
   void typeCheckTopLevelCodeDecl(TopLevelCodeDecl *TLCD);
 
   void processREPLTopLevel(SourceFile &SF, TopLevelContext &TLC,
@@ -1355,7 +1096,9 @@ public:
   void typeCheckDecl(Decl *D);
 
   void checkDeclAttributesEarly(Decl *D);
+  static void addImplicitDynamicAttribute(Decl *D);
   void checkDeclAttributes(Decl *D);
+  void checkDynamicReplacementAttribute(ValueDecl *D);
   void checkTypeModifyingDeclAttributes(VarDecl *var);
 
   void checkReferenceOwnershipAttr(VarDecl *D, ReferenceOwnershipAttr *attr);
@@ -1367,7 +1110,9 @@ public:
     validateDeclForNameLookup(VD);
   }
 
-  virtual void bindExtension(ExtensionDecl *ext) override;
+  virtual void resolveProtocolEnvironment(ProtocolDecl *proto) override {
+    validateDecl(proto);
+  }
 
   virtual void resolveExtension(ExtensionDecl *ext) override {
     validateExtension(ext);
@@ -1384,26 +1129,9 @@ public:
   /// Infer default value witnesses for all requirements in the given protocol.
   void inferDefaultWitnesses(ProtocolDecl *proto);
 
-  /// Perform semantic checks on the given generic parameter list.
-  void prepareGenericParamList(GenericParamList *genericParams,
-                               DeclContext *dc);
-
-  /// Revert the dependent types within the given generic parameter list.
-  void revertGenericParamList(GenericParamList *genericParams);
-
-  /// Revert the dependent types within a set of requirements.
-  void revertGenericRequirements(MutableArrayRef<RequirementRepr> requirements);
-
   /// Compute the generic signature, generic environment and interface type
   /// of a generic function.
   void validateGenericFuncSignature(AbstractFunctionDecl *func);
-
-  /// Check the generic parameters in the given generic parameter list (and its
-  /// parent generic parameter lists) according to the given resolver.
-  void checkGenericParamList(GenericSignatureBuilder *builder,
-                             GenericParamList *genericParams,
-                             GenericSignature *parentSig,
-                             GenericTypeResolver *resolver);
 
   /// Compute the generic signature, generic environment and interface type
   /// of a generic subscript.
@@ -1472,19 +1200,6 @@ public:
   /// \param nominal The generic type.
   void validateGenericTypeSignature(GenericTypeDecl *nominal);
 
-  bool validateRequirement(SourceLoc whereLoc, RequirementRepr &req,
-                           DeclContext *lookupDC,
-                           TypeResolutionOptions options = None,
-                           GenericTypeResolver *resolver = nullptr);
-
-  /// Validate the given requirements.
-  void validateRequirements(SourceLoc whereLoc,
-                            MutableArrayRef<RequirementRepr> requirements,
-                            DeclContext *dc,
-                            TypeResolutionOptions options,
-                            GenericTypeResolver *resolver,
-                            GenericSignatureBuilder *builder = nullptr);
-
   /// Create a text string that describes the bindings of generic parameters
   /// that are relevant to the given set of types, e.g.,
   /// "[with T = Bar, U = Wibble]".
@@ -1518,7 +1233,7 @@ public:
   /// requirement.
   /// \param listener The generic check listener used to pick requirements and
   /// notify callers about diagnosed errors.
-  RequirementCheckResult checkGenericArguments(
+  static RequirementCheckResult checkGenericArguments(
       DeclContext *dc, SourceLoc loc, SourceLoc noteLoc, Type owner,
       TypeArrayView<GenericTypeParamType> genericParams,
       ArrayRef<Requirement> requirements,
@@ -1528,22 +1243,11 @@ public:
       GenericRequirementsCheckListener *listener = nullptr,
       SubstOptions options = None);
 
-  /// Validate a protocol's where clause, along with the where clauses of
-  /// its associated types.
-  void validateWhereClauses(ProtocolDecl *protocol,
-                            GenericTypeResolver *resolver);
-
-  void resolveTrailingWhereClause(ProtocolDecl *proto) override;
-
-  /// Check the inheritance clause of the given declaration.
-  void checkInheritanceClause(Decl *decl,
-                              GenericTypeResolver *resolver = nullptr);
-
   /// Diagnose if the class has no designated initializers.
   void maybeDiagnoseClassWithoutInitializers(ClassDecl *classDecl);
 
   ///
-  /// \brief Add any implicitly-defined constructors required for the given
+  /// Add any implicitly-defined constructors required for the given
   /// struct or class.
   void addImplicitConstructors(NominalTypeDecl *typeDecl);
 
@@ -1557,38 +1261,6 @@ public:
   /// complement of accessors.
   void synthesizeWitnessAccessorsForStorage(AbstractStorageDecl *requirement,
                                             AbstractStorageDecl *storage);
-
-  void synthesizeFunctionBody(SynthesizedFunction fn);
-
-  /// Provide storage and accessor implementations for the given property,
-  /// which must be lazy.
-  void completeLazyVarImplementation(VarDecl *lazyVar);
-  
-  /// Instantiate the storage implementation for a behavior-backed property.
-  void completePropertyBehaviorStorage(VarDecl *VD,
-                               VarDecl *BehaviorStorage,
-                               FuncDecl *DefaultInitStorage,
-                               FuncDecl *ParamInitStorage,
-                               Type SelfTy,
-                               Type StorageTy,
-                               NormalProtocolConformance *BehaviorConformance,
-                               SubstitutionMap interfaceMap,
-                               SubstitutionMap contextMap);
-  
-  /// Instantiate the parameter implementation for a behavior-backed
-  /// property.
-  void completePropertyBehaviorParameter(VarDecl *VD,
-                               FuncDecl *BehaviorParameter,
-                               NormalProtocolConformance *BehaviorConformance,
-                               SubstitutionMap interfaceMap);
-  
-  /// Instantiate the accessor implementations for a behavior-backed
-  /// property.
-  void completePropertyBehaviorAccessors(VarDecl *VD,
-                                     VarDecl *ValueImpl,
-                                     Type valueTy,
-                                     SubstitutionMap interfaceMap,
-                                     SubstitutionMap contextMap);
 
   /// Pre-check the expression, validating any types that occur in the
   /// expression and folding sequence expressions.
@@ -1608,14 +1280,14 @@ private:
   Optional<Type> boolType;
 
 public:
-  /// \brief Define the default constructor for the given struct or class.
+  /// Define the default constructor for the given struct or class.
   void defineDefaultConstructor(NominalTypeDecl *decl);
 
-  /// \brief Fold the given sequence expression into an (unchecked) expression
+  /// Fold the given sequence expression into an (unchecked) expression
   /// tree.
   Expr *foldSequence(SequenceExpr *expr, DeclContext *dc);
 
-  /// \brief Type check the given expression.
+  /// Type check the given expression.
   ///
   /// \param expr The expression to type-check, which will be modified in
   /// place.
@@ -1659,7 +1331,7 @@ public:
   }
 
 
-  /// \brief Type check the given expression and return its type without
+  /// Type check the given expression and return its type without
   /// applying the solution.
   ///
   /// \param expr The expression to type-check.
@@ -1689,16 +1361,12 @@ public:
           FreeTypeVariableBinding::Disallow,
       ExprTypeCheckListener *listener = nullptr);
 
-  bool typeCheckCompletionSequence(Expr *&expr, DeclContext *DC);
-
-  /// \brief Type check the given expression assuming that its children
-  /// have already been fully type-checked.
-  ///
-  /// \param expr The expression to type-check, which will be modified in
-  /// place.
-  ///
-  /// \returns true if an error occurred, false otherwise.
-  bool typeCheckExpressionShallow(Expr *&expr, DeclContext *dc);
+  /// Return the type of operator function for specified LHS, or a null
+  /// \c Type on error.
+  FunctionType *getTypeOfCompletionOperator(DeclContext *DC, Expr *LHS,
+                                            Identifier opName,
+                                            DeclRefKind refKind,
+                                            ConcreteDeclRef &referencedDecl);
 
   /// Check the key-path expression.
   ///
@@ -1706,14 +1374,14 @@ public:
   Optional<Type> checkObjCKeyPathExpr(DeclContext *dc, KeyPathExpr *expr,
                                       bool requireResultType = false);
 
-  /// \brief Type check whether the given type declaration includes members of
+  /// Type check whether the given type declaration includes members of
   /// unsupported recursive value types.
   ///
   /// \param decl The declaration to be type-checked. This process will not
   /// modify the declaration.
   void checkDeclCircularity(NominalTypeDecl *decl);
 
-  /// \brief Type check whether the given switch statement exhaustively covers
+  /// Type check whether the given switch statement exhaustively covers
   /// its domain.
   ///
   /// \param stmt The switch statement to be type-checked.  No modification of
@@ -1725,7 +1393,7 @@ public:
   void checkSwitchExhaustiveness(const SwitchStmt *stmt, const DeclContext *DC,
                                  bool limitChecking);
 
-  /// \brief Type check the given expression as a condition, which converts
+  /// Type check the given expression as a condition, which converts
   /// it to a logic value.
   ///
   /// \param expr The expression to type-check, which will be modified in place
@@ -1734,7 +1402,7 @@ public:
   /// \returns true if an error occurred, false otherwise.
   bool typeCheckCondition(Expr *&expr, DeclContext *dc);
 
-  /// \brief Type check the given 'if' or 'while' statement condition, which
+  /// Type check the given 'if' or 'while' statement condition, which
   /// either converts an expression to a logic value or bind variables to the
   /// contents of an Optional.
   ///
@@ -1744,7 +1412,7 @@ public:
   bool typeCheckStmtCondition(StmtCondition &cond, DeclContext *dc,
                               Diag<> diagnosticForAlwaysTrue);
 
-  /// \brief Determine the semantics of a checked cast operation.
+  /// Determine the semantics of a checked cast operation.
   ///
   /// \param fromType       The source type of the cast.
   /// \param toType         The destination type of the cast.
@@ -1783,7 +1451,7 @@ public:
                                          Type dynamicType,
                                          Type valueType);
 
-  /// \brief Resolve ambiguous pattern/expr productions inside a pattern using
+  /// Resolve ambiguous pattern/expr productions inside a pattern using
   /// name lookup information. Must be done before type-checking the pattern.
   Pattern *resolvePattern(Pattern *P, DeclContext *dc,
                           bool isStmtCondition);
@@ -1805,22 +1473,19 @@ public:
   void requestRequiredNominalTypeLayoutForParameters(ParameterList *PL);
 
   /// Type check a parameter list.
-  bool typeCheckParameterList(ParameterList *PL, DeclContext *dc,
-                              TypeResolutionOptions options,
-                              GenericTypeResolver &resolver);
+  bool typeCheckParameterList(ParameterList *PL, TypeResolution resolution,
+                              TypeResolutionOptions options);
 
   /// Coerce a pattern to the given type.
   ///
   /// \param P The pattern, which may be modified by this coercion.
-  /// \param dc The context in which this pattern occurs.
+  /// \param resolution The type resolution.
   /// \param type the type to coerce the pattern to.
   /// \param options Options describing how to perform this coercion.
-  /// \param resolver The generic resolver to use.
   ///
   /// \returns true if an error occurred, false otherwise.
-  bool coercePatternToType(Pattern *&P, DeclContext *dc, Type type,
+  bool coercePatternToType(Pattern *&P, TypeResolution resolution, Type type,
                            TypeResolutionOptions options,
-                           GenericTypeResolver *resolver = nullptr,
                            TypeLoc tyLoc = TypeLoc());
   bool typeCheckExprPattern(ExprPattern *EP, DeclContext *DC,
                             Type type);
@@ -1833,22 +1498,20 @@ public:
 
   
   /// Type-check an initialized variable pattern declaration.
-  bool typeCheckBinding(Pattern *&P, Expr *&Init, DeclContext *DC,
-                        bool skipApplyingSolution);
-  bool typeCheckPatternBinding(PatternBindingDecl *PBD, unsigned patternNumber,
-                               bool skipApplyingSolution);
+  bool typeCheckBinding(Pattern *&P, Expr *&Init, DeclContext *DC);
+  bool typeCheckPatternBinding(PatternBindingDecl *PBD, unsigned patternNumber);
 
   /// Type-check a for-each loop's pattern binding and sequence together.
   bool typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt);
 
-  /// \brief Lazily diagnose conversions to C function pointers of closures
+  /// Lazily diagnose conversions to C function pointers of closures
   /// with captures.
   void maybeDiagnoseCaptures(Expr *E, AnyFunctionRef AFR);
 
-  /// \brief Compute the set of captures for the given function or closure.
+  /// Compute the set of captures for the given function or closure.
   void computeCaptures(AnyFunctionRef AFR);
 
-  /// \brief Change the context of closures in the given initializer
+  /// Change the context of closures in the given initializer
   /// expression to the given context.
   ///
   /// \returns true if any closures were found
@@ -1904,7 +1567,7 @@ public:
         base, wantInterfaceType);
   }
 
-  /// \brief Retrieve the default type for the given protocol.
+  /// Retrieve the default type for the given protocol.
   ///
   /// Some protocols, particularly those that correspond to literals, have
   /// default types associated with them. This routine retrieves that default
@@ -1914,7 +1577,7 @@ public:
   /// this protocol.
   Type getDefaultType(ProtocolDecl *protocol, DeclContext *dc);
 
-  /// \brief Convert the given expression to the given type.
+  /// Convert the given expression to the given type.
   ///
   /// \param expr The expression, which will be updated in place.
   /// \param type The type to convert to.
@@ -1925,7 +1588,7 @@ public:
   bool convertToType(Expr *&expr, Type type, DeclContext *dc,
                      Optional<Pattern*> typeFromPattern = None);
 
-  /// \brief Coerce the given expression to materializable type, if it
+  /// Coerce the given expression to materializable type, if it
   /// isn't already.
   Expr *coerceToRValue(Expr *expr,
                        llvm::function_ref<Type(Expr *)> getType
@@ -1935,7 +1598,7 @@ public:
                            expr->setType(type);
                          });
 
-  /// \brief Add implicit load expression to given AST, this is sometimes
+  /// Add implicit load expression to given AST, this is sometimes
   /// more complicated than simplify wrapping given root in newly created
   /// `LoadExpr`, because `ForceValueExpr` and `ParenExpr` supposed to appear
   /// only at certain positions in AST.
@@ -1955,7 +1618,7 @@ public:
   /// array literals exist.
   bool requireArrayLiteralIntrinsics(SourceLoc loc);
 
-  /// \brief Retrieve the witness type with the given name.
+  /// Retrieve the witness type with the given name.
   ///
   /// \param type The type that conforms to the given protocol.
   ///
@@ -1975,7 +1638,7 @@ public:
                       Identifier name,
                       Diag<> brokenProtocolDiag);
 
-  /// \brief Build a call to the witness with the given name and arguments.
+  /// Build a call to the witness with the given name and arguments.
   ///
   /// \param base The base expression, whose witness will be invoked.
   ///
@@ -1995,10 +1658,10 @@ public:
                     ProtocolDecl *protocol,
                     ProtocolConformanceRef conformance,
                     DeclName name,
-                    MutableArrayRef<Expr *> arguments,
+                    ArrayRef<Expr *> arguments,
                     Diag<> brokenProtocolDiag);
 
-  /// \brief Determine whether the given type contains the given protocol.
+  /// Determine whether the given type contains the given protocol.
   ///
   /// \param DC The context in which to check conformance. This affects, for
   /// example, extension visibility.
@@ -2007,12 +1670,12 @@ public:
   ///
   /// \returns the conformance, if \c T conforms to the protocol \c Proto, or
   /// an empty optional.
-  Optional<ProtocolConformanceRef> containsProtocol(
-                                     Type T, ProtocolDecl *Proto,
-                                     DeclContext *DC,
-                                     ConformanceCheckOptions options);
+  static Optional<ProtocolConformanceRef> containsProtocol(
+                                             Type T, ProtocolDecl *Proto,
+                                             DeclContext *DC,
+                                             ConformanceCheckOptions options);
 
-  /// \brief Determine whether the given type conforms to the given protocol.
+  /// Determine whether the given type conforms to the given protocol.
   ///
   /// Unlike subTypeOfProtocol(), this will return false for existentials of
   /// non-self conforming protocols.
@@ -2029,12 +1692,12 @@ public:
   ///
   /// \returns The protocol conformance, if \c T conforms to the
   /// protocol \c Proto, or \c None.
-  Optional<ProtocolConformanceRef> conformsToProtocol(
-                                     Type T,
-                                     ProtocolDecl *Proto,
-                                     DeclContext *DC,
-                                     ConformanceCheckOptions options,
-                                     SourceLoc ComplainLoc = SourceLoc());
+  static Optional<ProtocolConformanceRef> conformsToProtocol(
+                                           Type T,
+                                           ProtocolDecl *Proto,
+                                           DeclContext *DC,
+                                           ConformanceCheckOptions options,
+                                           SourceLoc ComplainLoc = SourceLoc());
 
   /// Mark the given protocol conformance as "used" from the given declaration
   /// context.
@@ -2045,12 +1708,10 @@ public:
   /// conformance through a particular declaration context using the given
   /// type checker.
   class LookUpConformance {
-    TypeChecker &tc;
     DeclContext *dc;
 
   public:
-    explicit LookUpConformance(TypeChecker &tc, DeclContext *dc)
-      : tc(tc), dc(dc) { }
+    explicit LookUpConformance(DeclContext *dc) : dc(dc) { }
 
     Optional<ProtocolConformanceRef>
     operator()(CanType dependentType,
@@ -2062,7 +1723,8 @@ public:
   void checkConformance(NormalProtocolConformance *conformance);
 
   /// Check the requirement signature of the given conformance.
-  void checkConformanceRequirements(NormalProtocolConformance *conformance);
+  void checkConformanceRequirements(NormalProtocolConformance *conformance)
+         override ;
 
   /// Check all of the conformances in the given context.
   void checkConformancesInContext(DeclContext *dc,
@@ -2099,15 +1761,6 @@ public:
                          NominalTypeDecl *nominal,
                          AssociatedTypeDecl *assocType);
 
-  /// Record the witness information into the given conformance that maps
-  /// the given requirement to the given witness declaration.
-  ///
-  /// Use this routine only when the given witness is known to satisfy the
-  /// requirement, e.g., because the witness itself was synthesized. This
-  /// function is not allowed to fail.
-  void recordKnownWitness(NormalProtocolConformance *conformance,
-                          ValueDecl *req, ValueDecl *witness);
-
   /// Perform unqualified name lookup at the given source location
   /// within a particular declaration context.
   ///
@@ -2132,7 +1785,7 @@ public:
                                NameLookupOptions options
                                  = defaultUnqualifiedLookupOptions);
 
-  /// \brief Lookup a member in the given type.
+  /// Lookup a member in the given type.
   ///
   /// \param dc The context that needs the member.
   /// \param type The type in which we will look for a member.
@@ -2144,12 +1797,11 @@ public:
                                    NameLookupOptions options
                                      = defaultMemberLookupOptions);
 
-  /// \brief Check whether the given declaration can be written as a
+  /// Check whether the given declaration can be written as a
   /// member of the given base type.
-  bool isUnsupportedMemberTypeAccess(Type type,
-                                     TypeDecl *typeDecl);
+  static bool isUnsupportedMemberTypeAccess(Type type, TypeDecl *typeDecl);
 
-  /// \brief Look up a member type within the given type.
+  /// Look up a member type within the given type.
   ///
   /// This routine looks for member types with the given name within the
   /// given type.
@@ -2160,12 +1812,12 @@ public:
   /// \param options Options that control name lookup.
   ///
   /// \returns The result of name lookup.
-  LookupTypeResult lookupMemberType(DeclContext *dc, Type type,
-                                    Identifier name,
-                                    NameLookupOptions options
-                                      = defaultMemberTypeLookupOptions);
+  static LookupTypeResult lookupMemberType(DeclContext *dc, Type type,
+                                           Identifier name,
+                                           NameLookupOptions options
+                                             = defaultMemberTypeLookupOptions);
 
-  /// \brief Look up the constructors of the given type.
+  /// Look up the constructors of the given type.
   ///
   /// \param dc The context that needs the constructor.
   /// \param type The type for which we will look for constructors.
@@ -2184,13 +1836,12 @@ public:
   PrecedenceGroupDecl *lookupPrecedenceGroup(DeclContext *dc, Identifier name,
                                              SourceLoc nameLoc);
 
-  /// \brief Look up the Bool type in the standard library.
-  Type lookupBoolType(const DeclContext *dc);
+  /// Given an pre-folded expression, find LHS from the expression if a binary
+  /// operator \c name appended to the expression.
+  Expr *findLHS(DeclContext *DC, Expr *E, Identifier name);
 
-  /// Diagnose an ambiguous member type lookup result.
-  void diagnoseAmbiguousMemberType(Type baseTy, SourceRange baseRange,
-                                   Identifier name, SourceLoc nameLoc,
-                                   LookupTypeResult &lookup);
+  /// Look up the Bool type in the standard library.
+  Type lookupBoolType(const DeclContext *dc);
 
   /// @}
 
@@ -2210,18 +1861,23 @@ public:
                                  ValueDecl *decl1,
                                  ValueDecl *decl2);
 
-  /// \brief Build a type-checked reference to the given value.
+  /// Build a type-checked reference to the given value.
   Expr *buildCheckedRefExpr(VarDecl *D, DeclContext *UseDC,
                             DeclNameLoc nameLoc, bool Implicit);
 
-  /// \brief Build a reference to a declaration, where name lookup returned
+  /// Build a reference to a declaration, where name lookup returned
   /// the given set of declarations.
   Expr *buildRefExpr(ArrayRef<ValueDecl *> Decls, DeclContext *UseDC,
                      DeclNameLoc NameLoc, bool Implicit,
                      FunctionRefKind functionRefKind);
+
+  /// Build implicit autoclosure expression wrapping a given expression.
+  /// Given expression represents computed result of the closure.
+  Expr *buildAutoClosureExpr(DeclContext *DC, Expr *expr,
+                             FunctionType *closureType);
   /// @}
 
-  /// \brief Retrieve a specific, known protocol.
+  /// Retrieve a specific, known protocol.
   ///
   /// \param loc The location at which we need to look for the protocol.
   /// \param kind The known protocol we're looking for.
@@ -2230,7 +1886,7 @@ public:
   /// problem with the Standard Library.
   ProtocolDecl *getProtocol(SourceLoc loc, KnownProtocolKind kind);
 
-  /// \brief Retrieve the literal protocol for the given expression.
+  /// Retrieve the literal protocol for the given expression.
   ///
   /// \returns the literal protocol, if known and available, or null if the
   /// expression does not have an associated literal protocol.
@@ -2263,7 +1919,6 @@ public:
   /// Used in diagnostic %selects.
   enum class FragileFunctionKind : unsigned {
     Transparent,
-    InlineAlways,
     Inlinable,
     DefaultArgument,
     PropertyInitializer
@@ -2290,7 +1945,7 @@ public:
   /// potentially unavailable API elements
   /// @{
 
-  /// \brief Returns true if the availability of the witness
+  /// Returns true if the availability of the witness
   /// is sufficient to safely conform to the requirement in the context
   /// the provided conformance. On return, requiredAvailability holds th
   /// availability levels required for conformance.
@@ -2368,7 +2023,7 @@ public:
   /// Emits a diagnostic for a reference to a storage accessor that is
   /// potentially unavailable.
   void diagnosePotentialAccessorUnavailability(
-      AccessorDecl *Accessor, SourceRange ReferenceRange,
+      const AccessorDecl *Accessor, SourceRange ReferenceRange,
       const DeclContext *ReferenceDC, const UnavailabilityReason &Reason,
       bool ForInout);
 
@@ -2433,7 +2088,7 @@ public:
   ///
   /// Returns true if the arguments list could be constructed, false if for
   /// some reason it could not.
-  bool getDefaultGenericArgumentsString(
+  static bool getDefaultGenericArgumentsString(
       SmallVectorImpl<char> &buf,
       const GenericTypeDecl *typeDecl,
       llvm::function_ref<Type(const GenericTypeParamDecl *)> getPreferredType =
@@ -2469,52 +2124,52 @@ class EncodedDiagnosticMessage {
 public:
   /// \param S A string with an encoded message
   EncodedDiagnosticMessage(StringRef S)
-      : Message(Lexer::getEncodedStringSegment(S, Buf)) {}
+      : Message(Lexer::getEncodedStringSegment(S, Buf, true, true, ~0U)) {}
 
   /// The unescaped message to display to the user.
   const StringRef Message;
 };
 
-/// Given a subscript defined as "subscript(dynamicMember:)->T", return true if
-/// it is an acceptable implementation of the @dynamicMemberLookup attribute's
-/// requirement.
-bool isAcceptableDynamicMemberLookupSubscript(SubscriptDecl *decl,
-                                              DeclContext *DC,
-                                              TypeChecker &TC);
+/// Returns true if the given method is an valid implementation of a
+/// @dynamicCallable attribute requirement. The method is given to be defined
+/// as one of the following: `dynamicallyCall(withArguments:)` or
+/// `dynamicallyCall(withKeywordArguments:)`.
+bool isValidDynamicCallableMethod(FuncDecl *decl, DeclContext *DC,
+                                  TypeChecker &TC, bool hasKeywordArguments);
 
-/// Determine whether this is a "pass-through" typealias, which has the
-/// same type parameters as the nominal type it references and specializes
-/// the underlying nominal type with exactly those type parameters.
-/// For example, the following typealias \c GX is a pass-through typealias:
-///
-/// \code
-/// struct X<T, U> { }
-/// typealias GX<A, B> = X<A, B>
-/// \endcode
-///
-/// whereas \c GX2 and \c GX3 are not pass-through because \c GX2 has
-/// different type parameters and \c GX3 doesn't pass its type parameters
-/// directly through.
-///
-/// \code
-/// typealias GX2<A> = X<A, A>
-/// typealias GX3<A, B> = X<B, A>
-/// \endcode
-bool isPassThroughTypealias(TypeAliasDecl *typealias);
+/// Returns true if the given subscript method is an valid implementation of
+/// the `subscript(dynamicMember:)` requirement for @dynamicMemberLookup.
+/// The method is given to be defined as `subscript(dynamicMember:)`.
+bool isValidDynamicMemberLookupSubscript(SubscriptDecl *decl, DeclContext *DC,
+                                         TypeChecker &TC);
+
+/// Whether an overriding declaration requires the 'override' keyword.
+enum class OverrideRequiresKeyword {
+  /// The keyword is never required.
+  Never,
+  /// The keyword is always required.
+  Always,
+  /// The keyword can be implicit; it is not required.
+  Implicit,
+};
 
 /// Determine whether overriding the given declaration requires a keyword.
-bool overrideRequiresKeyword(ValueDecl *overridden);
+OverrideRequiresKeyword overrideRequiresKeyword(ValueDecl *overridden);
 
 /// Compute the type of a member that will be used for comparison when
 /// performing override checking.
 Type getMemberTypeForComparison(ASTContext &ctx, ValueDecl *member,
-                                ValueDecl *derivedDecl = nullptr,
-                                bool stripLabels = true);
+                                ValueDecl *derivedDecl = nullptr);
 
 /// Determine whether the given declaration is an override by comparing type
 /// information.
 bool isOverrideBasedOnType(ValueDecl *decl, Type declTy,
                            ValueDecl *parentDecl, Type parentDeclTy);
+
+/// Determine whether the given declaration is an operator defined in a
+/// protocol. If \p type is not null, check specifically whether \p decl
+/// could fulfill a protocol requirement for it.
+bool isMemberOperator(FuncDecl *decl, Type type);
 
 } // end namespace swift
 

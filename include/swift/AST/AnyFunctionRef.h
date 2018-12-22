@@ -24,7 +24,7 @@
 namespace swift {
 class CaptureInfo;
 
-/// \brief A universal function reference -- can wrap all AST nodes that
+/// A universal function reference -- can wrap all AST nodes that
 /// represent functions and exposes a common interface to them.
 class AnyFunctionRef {
   PointerUnion<AbstractFunctionDecl *, AbstractClosureExpr *> TheFunction;
@@ -190,7 +190,8 @@ private:
     if (auto *AFD = TheFunction.dyn_cast<AbstractFunctionDecl *>()) {
       if (auto *AD = dyn_cast<AccessorDecl>(AFD)) {
         if (AD->isCoroutine()) {
-          auto valueTy = AD->getStorage()->getValueInterfaceType();
+          auto valueTy = AD->getStorage()->getValueInterfaceType()
+                                         ->getReferenceStorageReferent();
           if (mapIntoContext)
             valueTy = AD->mapTypeIntoContext(valueTy);
           YieldTypeFlags flags(AD->getAccessorKind() == AccessorKind::Modify

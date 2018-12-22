@@ -17,6 +17,10 @@
 
 namespace swift {
 
+//===----------------------------------------------------------------------===//
+//                         SSA Use-Def Helpers
+//===----------------------------------------------------------------------===//
+
 /// Strip off casts/indexing insts/address projections from V until there is
 /// nothing left to strip.
 SILValue getUnderlyingObject(SILValue V);
@@ -57,10 +61,6 @@ SILValue stripAddressAccess(SILValue V);
 /// instructions.
 SILValue stripAddressProjections(SILValue V);
 
-/// Return the underlying SILValue after stripping off all address projection
-/// instructions which have a single operand.
-SILValue stripUnaryAddressProjections(SILValue V);
-
 /// Return the underlying SILValue after stripping off all aggregate projection
 /// instructions.
 ///
@@ -81,6 +81,10 @@ SILValue stripExpectIntrinsic(SILValue V);
 /// If V is a begin_borrow, strip off the begin_borrow and return. Otherwise,
 /// ust return V.
 SILValue stripBorrow(SILValue V);
+
+//===----------------------------------------------------------------------===//
+//                         Instruction Properties
+//===----------------------------------------------------------------------===//
 
 /// Return a non-null SingleValueInstruction if the given instruction merely
 /// copies the value of its first operand, possibly changing its type or
@@ -113,6 +117,10 @@ bool isIncidentalUse(SILInstruction *user);
 /// This is useful for checking all users of a value to verify that the value is
 /// only used in recognizable patterns without otherwise "escaping".
 bool onlyAffectsRefCount(SILInstruction *user);
+
+/// Returns true if the given user instruction checks the ref count of a
+/// pointer.
+bool mayCheckRefCount(SILInstruction *User);
 
 /// Return true when the instruction represents added instrumentation for
 /// run-time sanitizers.

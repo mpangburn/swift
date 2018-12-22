@@ -48,6 +48,7 @@ namespace swift {
   class GenericParamList;
   class LazyResolver;
   class LazyMemberLoader;
+  class LazyMemberParser;
   class GenericSignature;
   class GenericTypeParamDecl;
   class GenericTypeParamType;
@@ -276,10 +277,6 @@ public:
   LLVM_READONLY
   bool isTypeContext() const;
 
-  /// \brief Determine whether this is an extension context.
-  LLVM_READONLY
-  bool isExtensionContext() const; // see swift/AST/Decl.h
-
   /// If this DeclContext is a NominalType declaration or an
   /// extension thereof, return the NominalTypeDecl.
   LLVM_READONLY
@@ -309,7 +306,7 @@ public:
   LLVM_READONLY
   ProtocolDecl *getExtendedProtocolDecl() const;
 
-  /// \brief Retrieve the generic parameter 'Self' from a protocol or
+  /// Retrieve the generic parameter 'Self' from a protocol or
   /// protocol extension.
   ///
   /// Only valid if \c getSelfProtocolDecl().
@@ -339,17 +336,21 @@ public:
   /// - Everything else falls back on getDeclaredInterfaceType().
   Type getSelfInterfaceType() const;
 
-  /// \brief Retrieve the innermost generic parameters of this context or any
-  /// of its parents.
-  ///
-  /// FIXME: Remove this
-  GenericParamList *getGenericParamsOfContext() const;
+  /// Visit the generic parameter list of every outer context, innermost first.
+  void forEachGenericContext(
+    llvm::function_ref<void (GenericParamList *)> fn) const;
 
-  /// \brief Retrieve the innermost generic signature of this context or any
+  /// Returns the depth of this generic context, or in other words,
+  /// the number of nested generic contexts minus one.
+  ///
+  /// This is (unsigned)-1 if none of the outer contexts are generic.
+  unsigned getGenericContextDepth() const;
+
+  /// Retrieve the innermost generic signature of this context or any
   /// of its parents.
   GenericSignature *getGenericSignatureOfContext() const;
 
-  /// \brief Retrieve the innermost archetypes of this context or any
+  /// Retrieve the innermost archetypes of this context or any
   /// of its parents.
   GenericEnvironment *getGenericEnvironmentOfContext() const;
 
@@ -500,7 +501,7 @@ public:
   /// lookup.
   ///
   /// \returns true if anything was found.
-  bool lookupQualified(ArrayRef<TypeDecl *> types, DeclName member,
+  bool lookupQualified(ArrayRef<NominalTypeDecl *> types, DeclName member,
                        NLOptions options,
                        SmallVectorImpl<ValueDecl *> &decls) const;
 

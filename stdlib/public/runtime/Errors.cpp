@@ -352,20 +352,27 @@ swift::fatalError(uint32_t flags, const char *format, ...)
 
 // Report a warning to system console and stderr.
 void
-swift::warning(uint32_t flags, const char *format, ...)
+swift::warningv(uint32_t flags, const char *format, va_list args)
 {
-  va_list args;
-  va_start(args, format);
-
   char *log;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
   swift_vasprintf(&log, format, args);
 #pragma GCC diagnostic pop
-
+  
   reportNow(flags, log);
-
+  
   free(log);
+}
+
+// Report a warning to system console and stderr.
+void
+swift::warning(uint32_t flags, const char *format, ...)
+{
+  va_list args;
+  va_start(args, format);
+
+  warningv(flags, format, args);
 }
 
 // Crash when a deleted method is called by accident.
@@ -411,4 +418,18 @@ void swift::swift_abortRetainUnowned(const void *object) {
                       "Fatal error: Attempted to read an unowned reference but "
                       "the object was already deallocated");
   }
+}
+
+/// Halt due to enabling an already enabled dynamic replacement().
+void swift::swift_abortDynamicReplacementEnabling() {
+  swift::fatalError(FatalErrorFlags::ReportBacktrace,
+                    "Fatal error: trying to enable a dynamic replacement "
+                    "that is already enabled");
+}
+
+/// Halt due to disabling an already disabled dynamic replacement().
+void swift::swift_abortDynamicReplacementDisabling() {
+  swift::fatalError(FatalErrorFlags::ReportBacktrace,
+                    "Fatal error: trying to disable a dynamic replacement "
+                    "that is already disabled");
 }

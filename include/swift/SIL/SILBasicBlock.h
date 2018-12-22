@@ -20,13 +20,14 @@
 #include "swift/Basic/Compiler.h"
 #include "swift/Basic/Range.h"
 #include "swift/Basic/TransformArrayRef.h"
+#include "swift/SIL/SILArgumentArrayRef.h"
 #include "swift/SIL/SILInstruction.h"
 
 namespace swift {
 
 class SILFunction;
 class SILArgument;
-class SILPHIArgument;
+class SILPhiArgument;
 class SILFunctionArgument;
 class SILPrintContext;
 
@@ -131,20 +132,20 @@ public:
     return const_cast<SILBasicBlock *>(this)->getTerminator();
   }
 
-  /// \brief Splits a basic block into two at the specified instruction.
+  /// Splits a basic block into two at the specified instruction.
   ///
   /// Note that all the instructions BEFORE the specified iterator
   /// stay as part of the original basic block. The old basic block is left
   /// without a terminator.
   SILBasicBlock *split(iterator I);
 
-  /// \brief Move the basic block to after the specified basic block in the IR.
+  /// Move the basic block to after the specified basic block in the IR.
   ///
   /// Assumes that the basic blocks must reside in the same function. In asserts
   /// builds, an assert verifies that this is true.
   void moveAfter(SILBasicBlock *After);
 
-  /// \brief Moves the instruction to the iterator in this basic block.
+  /// Moves the instruction to the iterator in this basic block.
   void moveTo(SILBasicBlock::iterator To, SILInstruction *I);
 
   //===--------------------------------------------------------------------===//
@@ -164,7 +165,7 @@ public:
   /// Iterator over the PHI arguments of a basic block.
   /// Defines an implicit cast operator on the iterator, so that this iterator
   /// can be used in the SSAUpdaterImpl.
-  template <typename PHIArgT = SILPHIArgument,
+  template <typename PHIArgT = SILPhiArgument,
             typename IteratorT = arg_iterator>
   class phi_iterator_impl {
   private:
@@ -179,7 +180,7 @@ public:
     bool operator!=(const phi_iterator_impl& x) const { return !operator==(x); }
   };
   typedef phi_iterator_impl<> phi_iterator;
-  typedef phi_iterator_impl<const SILPHIArgument,
+  typedef phi_iterator_impl<const SILPhiArgument,
                             SILBasicBlock::const_arg_iterator>
       const_phi_iterator;
 
@@ -192,12 +193,15 @@ public:
   }
 
   ArrayRef<SILArgument *> getArguments() const { return ArgumentList; }
-  using PHIArgumentArrayRefTy =
-      TransformArrayRef<SILPHIArgument *(*)(SILArgument *)>;
-  PHIArgumentArrayRefTy getPHIArguments() const;
-  using FunctionArgumentArrayRefTy =
-      TransformArrayRef<SILFunctionArgument *(*)(SILArgument *)>;
-  FunctionArgumentArrayRefTy getFunctionArguments() const;
+
+  /// Returns a transform array ref that performs llvm::cast<SILPhiArgument> on
+  /// each argument and then returns the downcasted value.
+  PhiArgumentArrayRef getPhiArguments() const;
+
+  /// Returns a transform array ref that performs
+  /// llvm::cast<SILFunctionArgument> on each argument and then returns the
+  /// downcasted value.
+  FunctionArgumentArrayRef getFunctionArguments() const;
 
   unsigned getNumArguments() const { return ArgumentList.size(); }
   const SILArgument *getArgument(unsigned i) const { return ArgumentList[i]; }
@@ -230,30 +234,30 @@ public:
   /// Replace the \p{i}th BB arg with a new BBArg with SILType \p Ty and
   /// ValueDecl
   /// \p D.
-  SILPHIArgument *replacePHIArgument(unsigned i, SILType Ty,
+  SILPhiArgument *replacePhiArgument(unsigned i, SILType Ty,
                                      ValueOwnershipKind Kind,
                                      const ValueDecl *D = nullptr);
 
   /// Allocate a new argument of type \p Ty and append it to the argument
   /// list. Optionally you can pass in a value decl parameter.
-  SILPHIArgument *createPHIArgument(SILType Ty, ValueOwnershipKind Kind,
+  SILPhiArgument *createPhiArgument(SILType Ty, ValueOwnershipKind Kind,
                                     const ValueDecl *D = nullptr);
 
-  /// Insert a new SILPHIArgument with type \p Ty and \p Decl at position \p
+  /// Insert a new SILPhiArgument with type \p Ty and \p Decl at position \p
   /// Pos.
-  SILPHIArgument *insertPHIArgument(arg_iterator Pos, SILType Ty,
+  SILPhiArgument *insertPhiArgument(arg_iterator Pos, SILType Ty,
                                     ValueOwnershipKind Kind,
                                     const ValueDecl *D = nullptr);
 
-  SILPHIArgument *insertPHIArgument(unsigned Index, SILType Ty,
+  SILPhiArgument *insertPhiArgument(unsigned Index, SILType Ty,
                                     ValueOwnershipKind Kind,
                                     const ValueDecl *D = nullptr) {
     arg_iterator Pos = ArgumentList.begin();
     std::advance(Pos, Index);
-    return insertPHIArgument(Pos, Ty, Kind, D);
+    return insertPhiArgument(Pos, Ty, Kind, D);
   }
 
-  /// \brief Remove all block arguments.
+  /// Remove all block arguments.
   void dropAllArguments() { ArgumentList.clear(); }
 
   //===--------------------------------------------------------------------===//
@@ -307,7 +311,7 @@ public:
     return getTerminator()->getSingleSuccessorBlock();
   }
 
-  /// \brief Returns true if \p BB is a successor of this block.
+  /// Returns true if \p BB is a successor of this block.
   bool isSuccessorBlock(SILBasicBlock *Block) const {
     return getTerminator()->isSuccessorBlock(Block);
   }
@@ -366,7 +370,7 @@ public:
   /// no-return apply or builtin.
   bool isNoReturn() const;
 
-  /// Returns true if this instruction only contains a branch instruction.
+  /// Returns true if this block only contains a branch instruction.
   bool isTrampoline() const;
 
   /// Returns true if it is legal to hoist instructions into this block.
@@ -399,7 +403,7 @@ public:
     return &SILBasicBlock::InstList;
   }
 
-  /// \brief Drops all uses that belong to this basic block.
+  /// Drops all uses that belong to this basic block.
   void dropAllReferences() {
     dropAllArguments();
     for (SILInstruction &I : *this)

@@ -33,37 +33,37 @@ llvm::cl::opt<bool> DisableConvertEscapeToNoEscapeSwitchEnumPeephole(
 
 using namespace swift;
 
-static SILBasicBlock *getOptionalDiamondSuccessor(SwitchEnumInst *SEI) {
-   auto numSuccs = SEI->getNumSuccessors();
-   if (numSuccs != 2)
-     return nullptr;
-   auto *SuccSome = SEI->getCase(0).second;
-   auto *SuccNone = SEI->getCase(1).second;
-   if (SuccSome->args_size() != 1)
-     std::swap(SuccSome, SuccNone);
+static SILBasicBlock *getOptionalDiamondSuccessor(SwitchEnumInst *sei) {
+  auto numSuccs = sei->getNumSuccessors();
+  if (numSuccs != 2)
+    return nullptr;
+  auto *succSome = sei->getCase(0).second;
+  auto *succNone = sei->getCase(1).second;
+  if (succSome->args_size() != 1)
+    std::swap(succSome, succNone);
 
-   if (SuccSome->args_size() != 1 || SuccNone->args_size() != 0)
-     return nullptr;
+  if (succSome->args_size() != 1 || succNone->args_size() != 0)
+    return nullptr;
 
-   auto *Succ = SuccSome->getSingleSuccessorBlock();
-   if (!Succ)
-     return nullptr;
+  auto *succ = succSome->getSingleSuccessorBlock();
+  if (!succ)
+    return nullptr;
 
-   if (SuccNone == Succ)
-     return Succ;
+  if (succNone == succ)
+    return succ;
 
-   SuccNone = SuccNone->getSingleSuccessorBlock();
-   if (SuccNone == Succ)
-     return Succ;
+  succNone = succNone->getSingleSuccessorBlock();
+  if (succNone == succ)
+    return succ;
 
-   if (SuccNone == nullptr)
-     return nullptr;
+  if (succNone == nullptr)
+    return nullptr;
 
-   SuccNone = SuccNone->getSingleSuccessorBlock();
-   if (SuccNone == Succ)
-     return Succ;
+  succNone = succNone->getSingleSuccessorBlock();
+  if (succNone == succ)
+    return succ;
 
-   return nullptr;
+  return nullptr;
 }
 
 /// Find a safe insertion point for closure destruction. We might create a
@@ -203,8 +203,7 @@ static bool tryExtendLifetimeToLastUse(
   // Handle an apply.
   if (auto SingleApplyUser = FullApplySite::isa(SingleUser)) {
     // FIXME: Don't know how-to handle begin_apply/end_apply yet.
-    if (auto *Begin =
-            dyn_cast<BeginApplyInst>(SingleApplyUser.getInstruction())) {
+    if (isa<BeginApplyInst>(SingleApplyUser.getInstruction())) {
       return false;
     }
 
@@ -460,10 +459,12 @@ static bool fixupCopyBlockWithoutEscaping(CopyBlockWithoutEscapingInst *CB) {
 
   for (auto LifetimeEndPoint : LifetimeEndPoints) {
     SILBuilderWithScope B(LifetimeEndPoint);
-    auto IsEscaping =
-        B.createIsEscapingClosure(Loc, B.createLoadBorrow(generatedLoc, Slot),
-                                  IsEscapingClosureInst::ObjCEscaping);
-    B.createCondFail(Loc, IsEscaping);
+    SILValue isEscaping;
+    B.emitScopedBorrowOperation(generatedLoc, Slot, [&](SILValue value) {
+      isEscaping = B.createIsEscapingClosure(
+          Loc, value, IsEscapingClosureInst::ObjCEscaping);
+    });
+    B.createCondFail(Loc, isEscaping);
     B.createDestroyAddr(generatedLoc, Slot);
     // Store None to it.
     B.createStore(generatedLoc,

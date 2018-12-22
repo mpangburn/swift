@@ -81,9 +81,8 @@ SILInstruction *CastOptimizer::optimizeBridgedObjCToSwiftCast(
   // to _BridgedToObjectiveC can be proven.
   FuncDecl *BridgeFuncDecl =
       isConditional
-          ? M.getASTContext().getConditionallyBridgeFromObjectiveCBridgeable(
-                nullptr)
-          : M.getASTContext().getForceBridgeFromObjectiveCBridgeable(nullptr);
+          ? M.getASTContext().getConditionallyBridgeFromObjectiveCBridgeable()
+          : M.getASTContext().getForceBridgeFromObjectiveCBridgeable();
 
   assert(BridgeFuncDecl && "_forceBridgeFromObjectiveC should exist");
 
@@ -148,7 +147,7 @@ SILInstruction *CastOptimizer::optimizeBridgedObjCToSwiftCast(
       // from ObjCTy to _ObjectiveCBridgeable._ObjectiveCType.
       if (isConditional) {
         SILBasicBlock *CastSuccessBB = Inst->getFunction()->createBasicBlock();
-        CastSuccessBB->createPHIArgument(SILBridgedTy,
+        CastSuccessBB->createPhiArgument(SILBridgedTy,
                                          ValueOwnershipKind::Owned);
         Builder.createBranch(Loc, CastSuccessBB, SILValue(Load));
         Builder.setInsertionPoint(CastSuccessBB);
@@ -158,7 +157,7 @@ SILInstruction *CastOptimizer::optimizeBridgedObjCToSwiftCast(
       }
     } else if (isConditional) {
       SILBasicBlock *CastSuccessBB = Inst->getFunction()->createBasicBlock();
-      CastSuccessBB->createPHIArgument(SILBridgedTy, ValueOwnershipKind::Owned);
+      CastSuccessBB->createPhiArgument(SILBridgedTy, ValueOwnershipKind::Owned);
       auto *CCBI = Builder.createCheckedCastBranch(Loc, false, Load,
                                       SILBridgedTy, CastSuccessBB, ConvFailBB);
       NewI = CCBI;
@@ -242,13 +241,19 @@ SILInstruction *CastOptimizer::optimizeBridgedObjCToSwiftCast(
   }
 
   if (auto *CCABI = dyn_cast<CheckedCastAddrBranchInst>(Inst)) {
-    if (CCABI->getConsumptionKind() == CastConsumptionKind::TakeAlways) {
+    switch (CCABI->getConsumptionKind()) {
+    case CastConsumptionKind::TakeAlways:
       Builder.createReleaseValue(Loc, SrcOp, Builder.getDefaultAtomicity());
-    } else if (CCABI->getConsumptionKind() ==
-               CastConsumptionKind::TakeOnSuccess) {
+      break;
+    case CastConsumptionKind::TakeOnSuccess:
       // Insert a release in the success BB.
       Builder.setInsertionPoint(SuccessBB->begin());
       Builder.createReleaseValue(Loc, SrcOp, Builder.getDefaultAtomicity());
+      break;
+    case CastConsumptionKind::BorrowAlways:
+      llvm_unreachable("checked_cast_addr_br never has BorrowAlways");
+    case CastConsumptionKind::CopyOnSuccess:
+      break;
     }
   }
 
@@ -348,17 +353,15 @@ SILInstruction *CastOptimizer::optimizeBridgedSwiftToObjCCast(
 
   auto *NTD = Source.getNominalOrBoundGenericNominal();
   assert(NTD);
-  SmallVector<ValueDecl *, 4> FoundMembers;
-  ArrayRef<ValueDecl *> Members;
-  Members = NTD->lookupDirect(M.getASTContext().Id_bridgeToObjectiveC);
+  auto Members = NTD->lookupDirect(M.getASTContext().Id_bridgeToObjectiveC);
   if (Members.empty()) {
+    SmallVector<ValueDecl *, 4> FoundMembers;
     if (NTD->getDeclContext()->lookupQualified(
             NTD, M.getASTContext().Id_bridgeToObjectiveC,
             NLOptions::NL_ProtocolMembers, FoundMembers)) {
-      Members = FoundMembers;
       // Returned members are starting with the most specialized ones.
       // Thus, the first element is what we are looking for.
-      Members = Members.take_front(1);
+      Members.push_back(FoundMembers.front());
     }
   }
 
@@ -442,6 +445,7 @@ SILInstruction *CastOptimizer::optimizeBridgedSwiftToObjCCast(
     case CastConsumptionKind::TakeOnSuccess:
       needReleaseInSuccess = true;
       break;
+    case CastConsumptionKind::BorrowAlways:
     case CastConsumptionKind::CopyOnSuccess:
       // Conservatively insert a retain/release pair around the conversion
       // function because the conversion function could decrement the
@@ -564,7 +568,7 @@ SILInstruction *CastOptimizer::optimizeBridgedSwiftToObjCCast(
         // In case of a conditional cast, we should handle it gracefully.
         auto CondBrSuccessBB =
             NewAI->getFunction()->createBasicBlockAfter(NewAI->getParent());
-        CondBrSuccessBB->createPHIArgument(DestTy, ValueOwnershipKind::Owned,
+        CondBrSuccessBB->createPhiArgument(DestTy, ValueOwnershipKind::Owned,
                                            nullptr);
         Builder.createCheckedCastBranch(Loc, /* isExact*/ false, NewAI, DestTy,
                                         CondBrSuccessBB, FailureBB);
@@ -771,12 +775,21 @@ SILInstruction *CastOptimizer::simplifyCheckedCastAddrBranchInst(
     if (!Src->getType().isAddress() || !Dest->getType().isAddress()) {
       return nullptr;
     }
+
     // For CopyOnSuccess casts, we could insert an explicit copy here, but this
     // case does not happen in practice.
+    //
     // Both TakeOnSuccess and TakeAlways can be reduced to an
     // UnconditionalCheckedCast, since the failure path is irrelevant.
-    if (Inst->getConsumptionKind() == CastConsumptionKind::CopyOnSuccess)
+    switch (Inst->getConsumptionKind()) {
+    case CastConsumptionKind::BorrowAlways:
+      llvm_unreachable("checked_cast_addr_br never has BorrowAlways");
+    case CastConsumptionKind::CopyOnSuccess:
       return nullptr;
+    case CastConsumptionKind::TakeAlways:
+    case CastConsumptionKind::TakeOnSuccess:
+      break;
+    }
 
     if (!emitSuccessfulIndirectUnconditionalCast(Builder, Mod.getSwiftModule(),
                                                  Loc, Src, SourceType, Dest,
@@ -1057,7 +1070,7 @@ SILInstruction *CastOptimizer::optimizeCheckedCastAddrBranchInst(
               Loc, false /*isExact*/, MI, Dest->getType().getObjectType(),
               SuccessBB, FailureBB, Inst->getTrueBBCount(),
               Inst->getFalseBBCount());
-          SuccessBB->createPHIArgument(Dest->getType().getObjectType(),
+          SuccessBB->createPhiArgument(Dest->getType().getObjectType(),
                                        ValueOwnershipKind::Owned);
           B.setInsertionPoint(SuccessBB->begin());
           // Store the result
@@ -1378,68 +1391,68 @@ static bool optimizeStaticallyKnownProtocolConformance(
     auto *SM = Mod.getSwiftModule();
 
     auto Proto = dyn_cast<ProtocolDecl>(TargetType->getAnyNominal());
-    if (Proto) {
-      auto Conformance = SM->lookupConformance(SourceType, Proto);
-      if (Conformance.hasValue() &&
-          Conformance->getConditionalRequirements().empty()) {
-        // SourceType is a non-existential type with a non-conditional
-        // conformance to a protocol represented by the TargetType.
-        //
-        // Conditional conformances are complicated: they may depend on
-        // information not known until runtime. For instance, if `X: P` where `T
-        // == Int` in `func foo<T>(_: T) { ... X<T>() as? P ... }`, the cast
-        // will succeed for `foo(0)` but not for `foo("string")`. There are many
-        // cases where everything is completely static (`X<Int>() as? P`), but
-        // we don't try to handle that at the moment.
-        SILBuilder B(Inst);
-        SmallVector<ProtocolConformanceRef, 1> NewConformances;
-        NewConformances.push_back(Conformance.getValue());
-        ArrayRef<ProtocolConformanceRef> Conformances =
-            Ctx.AllocateCopy(NewConformances);
+    if (!Proto)
+      return false;
 
-        auto ExistentialRepr =
-            Dest->getType().getPreferredExistentialRepresentation(Mod,
-                                                                  SourceType);
+    // SourceType is a non-existential type with a non-conditional
+    // conformance to a protocol represented by the TargetType.
+    //
+    // TypeChecker::conformsToProtocol checks any conditional conformances. If
+    // they depend on information not known until runtime, the conformance
+    // will not be returned. For instance, if `X: P` where `T == Int` in `func
+    // foo<T>(_: T) { ... X<T>() as? P ... }`, the cast will succeed for
+    // `foo(0)` but not for `foo("string")`. There are many cases where
+    // everything is completely static (`X<Int>() as? P`), in which case a
+    // valid conformance will be returned.
+    auto Conformance = SM->conformsToProtocol(SourceType, Proto);
+    if (!Conformance)
+      return false;
 
-        switch (ExistentialRepr) {
-        default:
-          return false;
-        case ExistentialRepresentation::Opaque: {
-          auto ExistentialAddr = B.createInitExistentialAddr(
-              Loc, Dest, SourceType, Src->getType().getObjectType(),
-              Conformances);
-          B.createCopyAddr(Loc, Src, ExistentialAddr, IsTake_t::IsTake,
-                           IsInitialization_t::IsInitialization);
-          break;
-        }
-        case ExistentialRepresentation::Class: {
-          auto Value = B.createLoad(Loc, Src,
-                                    swift::LoadOwnershipQualifier::Unqualified);
-          auto Existential =
-              B.createInitExistentialRef(Loc, Dest->getType().getObjectType(),
-                                         SourceType, Value, Conformances);
-          B.createStore(Loc, Existential, Dest,
-                        swift::StoreOwnershipQualifier::Unqualified);
-          break;
-        }
-        case ExistentialRepresentation::Boxed: {
-          auto AllocBox = B.createAllocExistentialBox(Loc, Dest->getType(),
-                                                      SourceType, Conformances);
-          auto Projection =
-              B.createProjectExistentialBox(Loc, Src->getType(), AllocBox);
-          // This needs to be a copy_addr (for now) because we must handle
-          // address-only types.
-          B.createCopyAddr(Loc, Src, Projection, IsTake, IsInitialization);
-          B.createStore(Loc, AllocBox, Dest,
-                        swift::StoreOwnershipQualifier::Unqualified);
-          break;
-        }
-        };
+    SILBuilder B(Inst);
+    SmallVector<ProtocolConformanceRef, 1> NewConformances;
+    NewConformances.push_back(Conformance.getValue());
+    ArrayRef<ProtocolConformanceRef> Conformances =
+        Ctx.AllocateCopy(NewConformances);
 
-        return true;
-      }
+    auto ExistentialRepr =
+        Dest->getType().getPreferredExistentialRepresentation(Mod, SourceType);
+
+    switch (ExistentialRepr) {
+    default:
+      return false;
+    case ExistentialRepresentation::Opaque: {
+      auto ExistentialAddr = B.createInitExistentialAddr(
+          Loc, Dest, SourceType, Src->getType().getObjectType(), Conformances);
+      B.createCopyAddr(Loc, Src, ExistentialAddr, IsTake_t::IsTake,
+                       IsInitialization_t::IsInitialization);
+      break;
     }
+    case ExistentialRepresentation::Class: {
+      auto Value =
+          B.createLoad(Loc, Src, swift::LoadOwnershipQualifier::Unqualified);
+      auto Existential =
+          B.createInitExistentialRef(Loc, Dest->getType().getObjectType(),
+                                     SourceType, Value, Conformances);
+      B.createStore(Loc, Existential, Dest,
+                    swift::StoreOwnershipQualifier::Unqualified);
+      break;
+    }
+    case ExistentialRepresentation::Boxed: {
+      auto AllocBox = B.createAllocExistentialBox(Loc, Dest->getType(),
+                                                  SourceType, Conformances);
+      auto Projection =
+          B.createProjectExistentialBox(Loc, Src->getType(), AllocBox);
+      // This needs to be a copy_addr (for now) because we must handle
+      // address-only types.
+      B.createCopyAddr(Loc, Src, Projection, IsTake, IsInitialization);
+      B.createStore(Loc, AllocBox, Dest,
+                    swift::StoreOwnershipQualifier::Unqualified);
+      break;
+    }
+    };
+    return true;
   }
+  // Not a concrete -> existential cast.
   return false;
 }
 
@@ -1560,5 +1573,42 @@ SILInstruction *CastOptimizer::optimizeUnconditionalCheckedCastAddrInst(
     WillSucceedAction();
   }
 
+  return nullptr;
+}
+
+/// Simplify conversions between thick and objc metatypes.
+SILInstruction *CastOptimizer::optimizeMetatypeConversion(
+    ConversionInst *MCI, MetatypeRepresentation Representation) {
+  SILValue Op = MCI->getOperand(0);
+  // Instruction has a proper target type already.
+  SILType Ty = MCI->getType();
+  auto MetatypeTy = Op->getType().getAs<AnyMetatypeType>();
+
+  if (MetatypeTy->getRepresentation() != Representation)
+    return nullptr;
+
+  // Rematerialize the incoming metatype instruction with the outgoing type.
+  auto replaceCast = [&](SingleValueInstruction *NewCast) {
+    assert(Ty.getAs<AnyMetatypeType>()->getRepresentation()
+           == NewCast->getType().getAs<AnyMetatypeType>()->getRepresentation());
+    MCI->replaceAllUsesWith(NewCast);
+    EraseInstAction(MCI);
+    return NewCast;
+  };
+  if (auto *MI = dyn_cast<MetatypeInst>(Op)) {
+    return replaceCast(
+        SILBuilderWithScope(MCI).createMetatype(MCI->getLoc(), Ty));
+  }
+  // For metatype instructions that require an operand, generate the new
+  // metatype at the same position as the original to avoid extending the
+  // lifetime of `Op` past its destroy.
+  if (auto *VMI = dyn_cast<ValueMetatypeInst>(Op)) {
+    return replaceCast(SILBuilderWithScope(VMI).createValueMetatype(
+        MCI->getLoc(), Ty, VMI->getOperand()));
+  }
+  if (auto *EMI = dyn_cast<ExistentialMetatypeInst>(Op)) {
+    return replaceCast(SILBuilderWithScope(EMI).createExistentialMetatype(
+        MCI->getLoc(), Ty, EMI->getOperand()));
+  }
   return nullptr;
 }

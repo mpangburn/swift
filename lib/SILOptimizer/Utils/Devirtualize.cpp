@@ -75,7 +75,7 @@ void swift::getAllSubclasses(ClassHierarchyAnalysis *CHA,
   }
 }
 
-/// \brief Returns true, if a method implementation corresponding to
+/// Returns true, if a method implementation corresponding to
 /// the class_method applied to an instance of the class CD is
 /// effectively final, i.e. it is statically known to be not overridden
 /// by any subclasses of the class CD.
@@ -249,7 +249,7 @@ SILValue swift::getInstanceWithExactDynamicType(SILValue S, SILModule &M,
     // Traverse the chain of predecessors.
     if (isa<BranchInst>(SinglePred->getTerminator()) ||
         isa<CondBranchInst>(SinglePred->getTerminator())) {
-      S = cast<SILPHIArgument>(Arg)->getIncomingValue(SinglePred);
+      S = cast<SILPhiArgument>(Arg)->getIncomingPhiValue(SinglePred);
       continue;
     }
 
@@ -319,11 +319,6 @@ SILType swift::getExactDynamicType(SILValue S, SILModule &M,
         ResultType = V->getType();
         continue;
       }
-      // Look through strong_pin instructions.
-      if (auto pin = dyn_cast<StrongPinInst>(V)) {
-        WorkList.push_back(pin->getOperand());
-        continue;
-      }
     }
 
     auto Arg = dyn_cast<SILArgument>(V);
@@ -379,8 +374,7 @@ SILType swift::getExactDynamicType(SILValue S, SILModule &M,
     // It is a BB argument, look through incoming values. If they all have the
     // same exact type, then we consider it to be the type of the BB argument.
     SmallVector<SILValue, 4> IncomingValues;
-
-    if (Arg->getIncomingValues(IncomingValues)) {
+    if (Arg->getSingleTerminatorOperands(IncomingValues)) {
       for (auto InValue : IncomingValues) {
         WorkList.push_back(InValue);
       }
@@ -504,7 +498,7 @@ static TryApplyInst *replaceTryApplyInst(SILBuilder &B, SILLocation Loc,
     ResultBB = NormalBB;
   } else {
     ResultBB = B.getFunction().createBasicBlockBefore(NormalBB);
-    ResultBB->createPHIArgument(NewResultTy, ValueOwnershipKind::Owned);
+    ResultBB->createPhiArgument(NewResultTy, ValueOwnershipKind::Owned);
   }
 
   // We can always just use the original error BB because we'll be
@@ -614,7 +608,7 @@ SILFunction *swift::getTargetClassMethod(SILModule &M,
   return M.lookUpFunctionInVTable(CD, Member);
 }
 
-/// \brief Check if it is possible to devirtualize an Apply instruction
+/// Check if it is possible to devirtualize an Apply instruction
 /// and a class member obtained using the class_method instruction into
 /// a direct call to a specific member of a specific class.
 ///
@@ -676,10 +670,19 @@ bool swift::canDevirtualizeClassMethod(FullApplySite AI,
       return false;
   }
 
+  // devirtualizeClassMethod below does not support this case. It currently
+  // assumes it can try_apply call the target.
+  if (!F->getLoweredFunctionType()->hasErrorResult() &&
+      isa<TryApplyInst>(AI.getInstruction())) {
+    LLVM_DEBUG(llvm::dbgs() << "        FAIL: Trying to devirtualize a "
+          "try_apply but vtable entry has no error result.\n");
+    return false;
+  }
+
   return true;
 }
 
-/// \brief Devirtualize an apply of a class method.
+/// Devirtualize an apply of a class method.
 ///
 /// \p AI is the apply to devirtualize.
 /// \p ClassOrMetatype is a class value or metatype value that is the
@@ -709,7 +712,7 @@ FullApplySite swift::devirtualizeClassMethod(FullApplySite AI,
 
   SILBuilderWithScope B(AI.getInstruction());
   SILLocation Loc = AI.getLoc();
-  FunctionRefInst *FRI = B.createFunctionRef(Loc, F);
+  auto *FRI = B.createFunctionRefFor(Loc, F);
 
   // Create the argument list for the new apply, casting when needed
   // in order to handle covariant indirect return types and
@@ -880,9 +883,10 @@ getWitnessMethodSubstitutions(
       witnessThunkSig);
 }
 
-static SubstitutionMap
-getWitnessMethodSubstitutions(SILModule &Module, ApplySite AI, SILFunction *F,
-                              ProtocolConformanceRef CRef) {
+SubstitutionMap
+swift::getWitnessMethodSubstitutions(SILModule &Module, ApplySite AI,
+                                     SILFunction *F,
+                                     ProtocolConformanceRef CRef) {
   auto witnessFnTy = F->getLoweredFunctionType();
   assert(witnessFnTy->getRepresentation() ==
          SILFunctionTypeRepresentation::WitnessMethod);
@@ -898,9 +902,9 @@ getWitnessMethodSubstitutions(SILModule &Module, ApplySite AI, SILFunction *F,
       == CRef.getRequirement());
   auto *classWitness = witnessFnTy->getWitnessMethodClass(*mod);
 
-  return getWitnessMethodSubstitutions(
-      mod, CRef, requirementSig, witnessThunkSig,
-      origSubs, isDefaultWitness, classWitness);
+  return ::getWitnessMethodSubstitutions(mod, CRef, requirementSig,
+                                         witnessThunkSig, origSubs,
+                                         isDefaultWitness, classWitness);
 }
 
 /// Generate a new apply of a function_ref to replace an apply of a
@@ -946,7 +950,7 @@ devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   // the witness thunk.
   SILBuilderWithScope Builder(AI.getInstruction());
   SILLocation Loc = AI.getLoc();
-  FunctionRefInst *FRI = Builder.createFunctionRef(Loc, F);
+  auto *FRI = Builder.createFunctionRefFor(Loc, F);
 
   ApplySite SAI = replaceApplySite(Builder, Loc, AI, FRI, SubMap, Arguments,
                                    substConv);
@@ -979,6 +983,15 @@ static bool canDevirtualizeWitnessMethod(ApplySite AI) {
     // hidden symbol.
     if (!F->hasValidLinkageForFragileRef())
       return false;
+  }
+
+  // devirtualizeWitnessMethod below does not support this case. It currently
+  // assumes it can try_apply call the target.
+  if (!F->getLoweredFunctionType()->hasErrorResult() &&
+      isa<TryApplyInst>(AI.getInstruction())) {
+    LLVM_DEBUG(llvm::dbgs() << "        FAIL: Trying to devirtualize a "
+          "try_apply but wtable entry has no error result.\n");
+    return false;
   }
 
   return true;

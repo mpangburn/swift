@@ -105,7 +105,7 @@ class OptBugReducerTestCase(unittest.TestCase):
         self.assertTrue('*** Found miscompiling passes!' in output)
         self.assertTrue('*** Final Passes: --bug-reducer-tester' in output)
         re_end = 'testoptbugreducer_testbasic_initial'
-        output_file_re = re.compile('\*\*\* Final File: .*' + re_end)
+        output_file_re = re.compile(r'\*\*\* Final File: .*' + re_end)
         output_matches = [
             1 for o in output if output_file_re.match(o) is not None]
         self.assertEquals(sum(output_matches), 1)
@@ -134,7 +134,7 @@ class OptBugReducerTestCase(unittest.TestCase):
         self.assertTrue('*** Found miscompiling passes!' in output)
         self.assertTrue('*** Final Passes: --bug-reducer-tester' in output)
         re_end = 'testoptbugreducer_testsuffixinneedofprefix_initial'
-        output_file_re = re.compile('\*\*\* Final File: .*' + re_end)
+        output_file_re = re.compile(r'\*\*\* Final File: .*' + re_end)
         output_matches = [
             1 for o in output if output_file_re.match(o) is not None]
         self.assertEquals(sum(output_matches), 1)
@@ -163,11 +163,11 @@ class OptBugReducerTestCase(unittest.TestCase):
         output = subprocess.check_output(args).split("\n")
         self.assertTrue('*** Found miscompiling passes!' in output)
         self.assertTrue(
-            '*** Final Functions: $S18testreducefunction6foo505yyF')
+            '*** Final Functions: $s18testreducefunction6foo413yyF' in output)
         self.assertTrue('*** Final Passes: --bug-reducer-tester' in output)
         re_end = 'testoptbugreducer_testreducefunction_initial_'
-        re_end += 'd6f20dea982155f8f1c99c8c547b96f7.sib'
-        output_file_re = re.compile('\*\*\* Final File: .*' + re_end)
+        re_end += '30775a3d942671a403702a9846afa7a4.sib'
+        output_file_re = re.compile(r'\*\*\* Final File: .*' + re_end)
         output_matches = [
             1 for o in output if output_file_re.match(o) is not None]
         self.assertEquals(sum(output_matches), 1)

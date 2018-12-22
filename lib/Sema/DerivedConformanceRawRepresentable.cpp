@@ -59,7 +59,8 @@ static Type deriveRawRepresentable_Raw(DerivedConformance &derived) {
   return derived.getConformanceContext()->mapTypeIntoContext(rawInterfaceType);
 }
 
-static void deriveBodyRawRepresentable_raw(AbstractFunctionDecl *toRawDecl) {
+static void deriveBodyRawRepresentable_raw(AbstractFunctionDecl *toRawDecl,
+                                           void *) {
   // enum SomeEnum : SomeType {
   //   case A = 111, B = 222
   //   @derived
@@ -188,7 +189,7 @@ static VarDecl *deriveRawRepresentable_raw(DerivedConformance &derived) {
 }
 
 static void
-deriveBodyRawRepresentable_init(AbstractFunctionDecl *initDecl) {
+deriveBodyRawRepresentable_init(AbstractFunctionDecl *initDecl, void *) {
   // enum SomeEnum : SomeType {
   //   case A = 111, B = 222
   //   @derived
@@ -319,9 +320,6 @@ deriveRawRepresentable_init(DerivedConformance &derived) {
   (void)equatableProto;
   (void)rawType;
 
-  auto *selfDecl = ParamDecl::createSelf(SourceLoc(), parentDC,
-                                         /*static*/false, /*inout*/true);
-
   auto *rawDecl = new (C)
       ParamDecl(VarDecl::Specifier::Default, SourceLoc(), SourceLoc(),
                 C.Id_rawValue, SourceLoc(), C.Id_rawValue, parentDC);
@@ -336,7 +334,7 @@ deriveRawRepresentable_init(DerivedConformance &derived) {
                             /*Failability=*/ OTK_Optional,
                             /*FailabilityLoc=*/SourceLoc(),
                             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
-                            selfDecl, paramList,
+                            paramList,
                             /*GenericParams=*/nullptr, parentDC);
   
   initDecl->setImplicit();

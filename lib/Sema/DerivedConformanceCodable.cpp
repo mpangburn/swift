@@ -512,7 +512,7 @@ static CallExpr *createContainerKeyedByCall(ASTContext &C, DeclContext *DC,
 /// Synthesizes the body for `func encode(to encoder: Encoder) throws`.
 ///
 /// \param encodeDecl The function decl whose body to synthesize.
-static void deriveBodyEncodable_encode(AbstractFunctionDecl *encodeDecl) {
+static void deriveBodyEncodable_encode(AbstractFunctionDecl *encodeDecl, void *) {
   // struct Foo : Codable {
   //   var x: Int
   //   var y: String
@@ -706,8 +706,7 @@ static FuncDecl *deriveEncodable_encode(DerivedConformance &derived) {
   auto encoderType = C.getEncoderDecl()->getDeclaredInterfaceType();
   auto returnType = TupleType::getEmpty(C);
 
-  // Params: (self [implicit], Encoder)
-  auto *selfDecl = ParamDecl::createSelf(SourceLoc(), conformanceDC);
+  // Params: (Encoder)
   auto *encoderParam = new (C)
       ParamDecl(VarDecl::Specifier::Default, SourceLoc(), SourceLoc(), C.Id_to,
                 SourceLoc(), C.Id_encoder, conformanceDC);
@@ -719,7 +718,7 @@ static FuncDecl *deriveEncodable_encode(DerivedConformance &derived) {
   DeclName name(C, C.Id_encode, params);
   auto *encodeDecl = FuncDecl::create(
       C, SourceLoc(), StaticSpellingKind::None, SourceLoc(), name, SourceLoc(),
-      /*Throws=*/true, SourceLoc(), nullptr, selfDecl, params,
+      /*Throws=*/true, SourceLoc(), nullptr, params,
       TypeLoc::withoutLoc(returnType), conformanceDC);
   encodeDecl->setImplicit();
   encodeDecl->setSynthesized();
@@ -750,7 +749,7 @@ static FuncDecl *deriveEncodable_encode(DerivedConformance &derived) {
 /// Synthesizes the body for `init(from decoder: Decoder) throws`.
 ///
 /// \param initDecl The function decl whose body to synthesize.
-static void deriveBodyDecodable_init(AbstractFunctionDecl *initDecl) {
+static void deriveBodyDecodable_init(AbstractFunctionDecl *initDecl, void *) {
   // struct Foo : Codable {
   //   var x: Int
   //   var y: String
@@ -1006,12 +1005,7 @@ static ValueDecl *deriveDecodable_init(DerivedConformance &derived) {
   //                         output: Self
   // Compute from the inside out:
 
-  // Params: (self [implicit], Decoder)
-  // self should be inout if the type is a value type; not inout otherwise.
-  auto *selfDecl = ParamDecl::createSelf(SourceLoc(), conformanceDC,
-                                         /*isStatic=*/false,
-                                         /*isInOut=*/!classDecl);
-
+  // Params: (Decoder)
   auto decoderType = C.getDecoderDecl()->getDeclaredInterfaceType();
   auto *decoderParamDecl = new (C) ParamDecl(
       VarDecl::Specifier::Default, SourceLoc(), SourceLoc(), C.Id_from,
@@ -1026,11 +1020,11 @@ static ValueDecl *deriveDecodable_init(DerivedConformance &derived) {
 
   auto *initDecl =
       new (C) ConstructorDecl(name, SourceLoc(), OTK_None, SourceLoc(),
-                              /*Throws=*/true, SourceLoc(), selfDecl, paramList,
+                              /*Throws=*/true, SourceLoc(), paramList,
                               /*GenericParams=*/nullptr, conformanceDC);
   initDecl->setImplicit();
   initDecl->setSynthesized();
-  initDecl->setBodySynthesizer(deriveBodyDecodable_init);
+  initDecl->setBodySynthesizer(&deriveBodyDecodable_init);
 
   // This constructor should be marked as `required` for non-final classes.
   if (classDecl && !classDecl->getAttrs().hasAttribute<FinalAttr>()) {

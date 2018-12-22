@@ -722,6 +722,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
       return false;
     }
     }
+    llvm_unreachable("unhandled case");
   }
 
   bool handleTypeHoist(ValueDecl *FD, CallExpr* Call, Expr *Arg) {
@@ -809,6 +810,7 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
       Editor.remove(Arg->getEndLoc());
       return true;
     }
+    llvm_unreachable("unhandled subkind");
   }
 
   void handleFunctionCallToPropertyChange(ValueDecl *FD, Expr* FuncRefContainer,
@@ -1400,6 +1402,19 @@ struct APIDiffMigratorPass : public ASTMigratorPass, public SourceEntityWalker {
         // Remove super-dot call.
         SuperRemoval Removal(Editor, OverridingRemoveNames);
         D->walk(Removal);
+      }
+    }
+
+    // Handle property overriding migration.
+    if (auto *VD = dyn_cast<VarDecl>(D)) {
+      for (auto *Item: getRelatedDiffItems(VD)) {
+        if (auto *CD = dyn_cast<CommonDiffItem>(Item)) {
+          // If the overriden property has been renamed, we should rename
+          // this property decl as well.
+          if (CD->isRename() && VD->getNameLoc().isValid()) {
+            Editor.replaceToken(VD->getNameLoc(), CD->getNewName());
+          }
+        }
       }
     }
     return true;

@@ -42,6 +42,10 @@ SILType SILType::getRawPointerType(const ASTContext &C) {
   return getPrimitiveObjectType(C.TheRawPointerType);
 }
 
+SILType SILType::getBuiltinIntegerLiteralType(const ASTContext &C) {
+  return getPrimitiveObjectType(C.TheIntegerLiteralType);
+}
+
 SILType SILType::getBuiltinIntegerType(unsigned bitWidth,
                                        const ASTContext &C) {
   return getPrimitiveObjectType(CanType(BuiltinIntegerType::get(bitWidth, C)));
@@ -385,6 +389,12 @@ SILType SILType::getReferentType(SILModule &M) const {
   return M.Types.getLoweredType(Ty->getReferentType()->getCanonicalType());
 }
 
+SILType SILType::mapTypeOutOfContext() const {
+  return SILType::getPrimitiveType(getASTType()->mapTypeOutOfContext()
+                                               ->getCanonicalType(),
+                                   getCategory());
+}
+
 CanType
 SILBoxType::getFieldLoweredType(SILModule &M, unsigned index) const {
   auto fieldTy = getLayout()->getFields()[index].getLoweredType();
@@ -410,7 +420,7 @@ SILResultInfo::getOwnershipKind(SILModule &M,
   switch (getConvention()) {
   case ResultConvention::Indirect:
     return SILModuleConventions(M).isSILIndirect(*this)
-               ? ValueOwnershipKind::Trivial
+               ? ValueOwnershipKind::Any
                : ValueOwnershipKind::Owned;
   case ResultConvention::Autoreleased:
   case ResultConvention::Owned:
@@ -418,7 +428,7 @@ SILResultInfo::getOwnershipKind(SILModule &M,
   case ResultConvention::Unowned:
   case ResultConvention::UnownedInnerPointer:
     if (IsTrivial)
-      return ValueOwnershipKind::Trivial;
+      return ValueOwnershipKind::Any;
     return ValueOwnershipKind::Unowned;
   }
 

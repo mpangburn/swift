@@ -173,12 +173,16 @@ UIdent UIdentVisitor::visitExtensionDecl(const ExtensionDecl *D) {
 }
 
 SwiftLangSupport::SwiftLangSupport(SourceKit::Context &SKCtx)
-    : SKCtx(SKCtx), CCCache(new SwiftCompletionCache) {
+    : NotificationCtr(SKCtx.getNotificationCenter()),
+      CCCache(new SwiftCompletionCache) {
   llvm::SmallString<128> LibPath(SKCtx.getRuntimeLibPath());
   llvm::sys::path::append(LibPath, "swift");
   RuntimeResourcePath = LibPath.str();
 
-  ASTMgr.reset(new SwiftASTManager(*this));
+  Stats = std::make_shared<SwiftStatistics>();
+  EditorDocuments = std::make_shared<SwiftEditorDocumentFileMap>();
+  ASTMgr = std::make_shared<SwiftASTManager>(EditorDocuments, Stats,
+                                             RuntimeResourcePath);
   // By default, just use the in-memory cache.
   CCCache->inMemory = llvm::make_unique<ide::CodeCompletionCache>();
 }
@@ -213,8 +217,6 @@ UIdent SwiftLangSupport::getUIDForAccessor(const ValueDecl *D,
                                            AccessorKind AccKind,
                                            bool IsRef) {
   switch (AccKind) {
-  case AccessorKind::MaterializeForSet:
-    llvm_unreachable("unexpected MaterializeForSet");
   case AccessorKind::Get:
     return IsRef ? KindRefAccessorGetter : KindDeclAccessorGetter;
   case AccessorKind::Set:
@@ -543,21 +545,24 @@ UIdent SwiftLangSupport::getUIDForSymbol(SymbolInfo sym, bool isRef) {
     return UID_FOR(TypeAlias);
 
   case SymbolKind::Function:
+  case SymbolKind::StaticMethod:
     if (sym.SubKind == SymbolSubKind::SwiftPrefixOperator)
       return UID_FOR(FunctionPrefixOperator);
     if (sym.SubKind == SymbolSubKind::SwiftPostfixOperator)
       return UID_FOR(FunctionPostfixOperator);
     if (sym.SubKind == SymbolSubKind::SwiftInfixOperator)
       return UID_FOR(FunctionInfixOperator);
-    return UID_FOR(FunctionFree);
+    if (sym.Kind == SymbolKind::StaticMethod) {
+      return UID_FOR(MethodStatic);
+    } else {
+      return UID_FOR(FunctionFree);
+    }
   case SymbolKind::Variable:
     return UID_FOR(VarGlobal);
   case SymbolKind::InstanceMethod:
     return UID_FOR(MethodInstance);
   case SymbolKind::ClassMethod:
     return UID_FOR(MethodClass);
-  case SymbolKind::StaticMethod:
-    return UID_FOR(MethodStatic);
   case SymbolKind::InstanceProperty:
     if (sym.SubKind == SymbolSubKind::SwiftSubscript)
       return UID_FOR(Subscript);
@@ -580,6 +585,9 @@ UIdent SwiftLangSupport::getUIDForSymbol(SymbolInfo sym, bool isRef) {
     } else {
       llvm_unreachable("missing extension sub kind");
     }
+
+  case SymbolKind::Module:
+    return KindRefModule;
 
   default:
     // TODO: reconsider whether having a default case is a good idea.
@@ -682,8 +690,8 @@ Optional<UIdent> SwiftLangSupport::getUIDForDeclAttribute(const swift::DeclAttri
     // Ignore these.
     case DAK_ShowInInterface:
     case DAK_RawDocComment:
-    case DAK_DowngradeExhaustivityCheck:
     case DAK_HasInitialValue:
+    case DAK_HasStorage:
       return None;
     default:
       break;
@@ -768,7 +776,7 @@ std::string SwiftLangSupport::resolvePathSymlinks(StringRef FilePath) {
 
 void SwiftLangSupport::getStatistics(StatisticsReceiver receiver) {
   std::vector<Statistic *> stats = {
-#define SWIFT_STATISTIC(VAR, UID, DESC) &Stats.VAR,
+#define SWIFT_STATISTIC(VAR, UID, DESC) &Stats->VAR,
 #include "SwiftStatistics.def"
   };
   receiver(stats);

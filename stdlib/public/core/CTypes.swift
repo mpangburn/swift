@@ -82,6 +82,11 @@ public typealias CLongDouble = Double
 public typealias CLongDouble = Float80
 #endif
 // TODO: Fill in definitions for other OSes.
+#if arch(s390x)
+// On s390x '-mlong-double-64' option with size of 64-bits makes the
+// Long Double type equivalent to Double type.
+public typealias CLongDouble = Double
+#endif
 #endif
 
 // FIXME: Is it actually UTF-32 on Darwin?
@@ -160,7 +165,7 @@ public struct OpaquePointer {
 }
 
 extension OpaquePointer: Equatable {
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // unsafe-performance
   public static func == (lhs: OpaquePointer, rhs: OpaquePointer) -> Bool {
     return Bool(Builtin.cmp_eq_RawPointer(lhs._rawValue, rhs._rawValue))
   }
@@ -193,7 +198,7 @@ extension Int {
   ///
   /// - Parameter pointer: The pointer to use as the source for the new
   ///   integer.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // unsafe-performance
   public init(bitPattern pointer: OpaquePointer?) {
     self.init(bitPattern: UnsafeRawPointer(pointer))
   }
@@ -207,31 +212,56 @@ extension UInt {
   ///
   /// - Parameter pointer: The pointer to use as the source for the new
   ///   integer.
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // unsafe-performance
   public init(bitPattern pointer: OpaquePointer?) {
     self.init(bitPattern: UnsafeRawPointer(pointer))
   }
 }
 
 /// A wrapper around a C `va_list` pointer.
+#if arch(arm64) && os(Linux)
 @_fixed_layout
 public struct CVaListPointer {
-  @usableFromInline // FIXME(sil-serialize-all)
-  internal var value: UnsafeMutableRawPointer
+  @usableFromInline // unsafe-performance
+  internal var value: (__stack: UnsafeMutablePointer<Int>?,
+                       __gr_top: UnsafeMutablePointer<Int>?,
+                       __vr_top: UnsafeMutablePointer<Int>?,
+                       __gr_off: Int32,
+                       __vr_off: Int32)
 
-  @inlinable // FIXME(sil-serialize-all)
+  @inlinable // unsafe-performance
+  public // @testable
+  init(__stack: UnsafeMutablePointer<Int>?,
+       __gr_top: UnsafeMutablePointer<Int>?,
+       __vr_top: UnsafeMutablePointer<Int>?,
+       __gr_off: Int32,
+       __vr_off: Int32) {
+    value = (__stack, __gr_top, __vr_top, __gr_off, __vr_off)
+  }
+}
+
+#else
+
+@_fixed_layout
+public struct CVaListPointer {
+  @usableFromInline // unsafe-performance
+  internal var _value: UnsafeMutableRawPointer
+
+  @inlinable // unsafe-performance
   public // @testable
   init(_fromUnsafeMutablePointer from: UnsafeMutableRawPointer) {
-    value = from
+    _value = from
   }
 }
 
 extension CVaListPointer : CustomDebugStringConvertible {
   /// A textual representation of the pointer, suitable for debugging.
   public var debugDescription: String {
-    return value.debugDescription
+    return _value.debugDescription
   }
 }
+
+#endif
 
 @inlinable
 internal func _memcpy(

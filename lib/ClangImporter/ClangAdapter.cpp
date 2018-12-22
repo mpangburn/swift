@@ -31,10 +31,10 @@ using namespace importer;
 
 /// Get a bit vector indicating which arguments are non-null for a
 /// given function or method.
-llvm::SmallBitVector
+SmallBitVector
 importer::getNonNullArgs(const clang::Decl *decl,
                          ArrayRef<const clang::ParmVarDecl *> params) {
-  llvm::SmallBitVector result;
+  SmallBitVector result;
   if (!decl)
     return result;
 
@@ -741,11 +741,10 @@ OptionalTypeKind importer::getParamOptionality(version::Version swiftVersion,
     return OTK_None;
 
   // Check for the 'static' annotation on C arrays.
-  if (!swiftVersion.isVersion3())
-    if (const auto *DT = dyn_cast<clang::DecayedType>(paramTy))
-      if (const auto *AT = DT->getOriginalType()->getAsArrayTypeUnsafe())
-        if (AT->getSizeModifier() == clang::ArrayType::Static)
-          return OTK_None;
+  if (const auto *DT = dyn_cast<clang::DecayedType>(paramTy))
+    if (const auto *AT = DT->getOriginalType()->getAsArrayTypeUnsafe())
+      if (AT->getSizeModifier() == clang::ArrayType::Static)
+        return OTK_None;
 
   // Default to implicitly unwrapped optionals.
   return OTK_ImplicitlyUnwrappedOptional;

@@ -156,7 +156,7 @@ static std::pair<unsigned, unsigned> getTypeDepthAndWidth(Type t) {
     for (auto &Param : Params) {
       unsigned TypeWidth;
       unsigned TypeDepth;
-      std::tie(TypeDepth, TypeWidth) = getTypeDepthAndWidth(Param.getType());
+      std::tie(TypeDepth, TypeWidth) = getTypeDepthAndWidth(Param.getOldType());
       if (TypeDepth > MaxTypeDepth)
         MaxTypeDepth = TypeDepth;
       Width += TypeWidth;
@@ -364,10 +364,17 @@ static bool createsInfiniteSpecializationLoop(ApplySite Apply) {
 // ReabstractionInfo
 // =============================================================================
 
-static bool shouldNotSpecializeCallee(SILFunction *Callee,
-                                      SubstitutionMap Subs = {}) {
+static bool shouldNotSpecialize(SILFunction *Callee, SILFunction *Caller,
+                                SubstitutionMap Subs = {}) {
   if (Callee->hasSemanticsAttr("optimize.sil.specialize.generic.never"))
     return true;
+
+  if (Caller &&
+      Caller->getEffectiveOptimizationMode() == OptimizationMode::ForSize &&
+      Callee->hasSemanticsAttr("optimize.sil.specialize.generic.size.never")) {
+    return true;
+  }
+
 
   if (Subs.hasAnySubstitutableParams() &&
       Callee->hasSemanticsAttr("optimize.sil.specialize.generic.partial.never"))
@@ -383,7 +390,7 @@ static bool shouldNotSpecializeCallee(SILFunction *Callee,
 bool ReabstractionInfo::prepareAndCheck(ApplySite Apply, SILFunction *Callee,
                                         SubstitutionMap ParamSubs,
                                         OptRemark::Emitter *ORE) {
-  if (shouldNotSpecializeCallee(Callee))
+  if (shouldNotSpecialize(Callee, Apply ? Apply.getFunction() : nullptr))
     return false;
 
   SpecializedGenericEnv = nullptr;
@@ -434,7 +441,11 @@ bool ReabstractionInfo::prepareAndCheck(ApplySite Apply, SILFunction *Callee,
   bool HasConcreteGenericParams = false;
   bool HasNonArchetypeGenericParams = false;
   HasUnboundGenericParams = false;
-  for (auto GP : CalleeGenericSig->getSubstitutableParams()) {
+
+  CalleeGenericSig->forEachParam([&](GenericTypeParamType *GP, bool Canonical) {
+    if (!Canonical)
+      return;
+
     // Check only the substitutions for the generic parameters.
     // Ignore any dependent types, etc.
     auto Replacement = Type(GP).subst(CalleeParamSubMap);
@@ -458,11 +469,10 @@ bool ReabstractionInfo::prepareAndCheck(ApplySite Apply, SILFunction *Callee,
             HasNonArchetypeGenericParams = true;
         }
       }
-      continue;
+    } else {
+      HasConcreteGenericParams = true;
     }
-
-    HasConcreteGenericParams = true;
-  }
+  });
 
   if (HasUnboundGenericParams) {
     // Bail if we cannot specialize generic substitutions, but all substitutions
@@ -486,7 +496,7 @@ bool ReabstractionInfo::prepareAndCheck(ApplySite Apply, SILFunction *Callee,
       return false;
 
     // Bail if the callee should not be partially specialized.
-    if (shouldNotSpecializeCallee(Callee, ParamSubs))
+    if (shouldNotSpecialize(Callee, Apply.getFunction(), ParamSubs))
       return false;
   }
 
@@ -730,8 +740,13 @@ ReabstractionInfo::createSubstitutedType(SILFunction *OrigF,
     // FIXME: Some of the added new requirements may not have been taken into
     // account by the substGenericArgs. So, canonicalize in the context of the
     // specialized signature.
-    FnTy = cast<SILFunctionType>(
-        CanSpecializedGenericSig->getCanonicalTypeInContext(FnTy));
+    if (CanSpecializedGenericSig)
+      FnTy = cast<SILFunctionType>(
+          CanSpecializedGenericSig->getCanonicalTypeInContext(FnTy));
+    else {
+      FnTy = cast<SILFunctionType>(FnTy->getCanonicalType());
+      assert(!FnTy->hasTypeParameter() && "Type parameters outside generic context?");
+    }
   }
   assert(FnTy);
 
@@ -1556,14 +1571,16 @@ void FunctionSignaturePartialSpecializer::
   // Simply create a set of same-type requirements based on concrete
   // substitutions.
   SmallVector<Requirement, 4> Requirements;
-  for (auto GP : CalleeGenericSig->getSubstitutableParams()) {
+  CalleeGenericSig->forEachParam([&](GenericTypeParamType *GP, bool Canonical) {
+    if (!Canonical)
+      return;
     auto Replacement = Type(GP).subst(CalleeInterfaceToCallerArchetypeMap);
     if (Replacement->hasArchetype())
-      continue;
+      return;
     // Replacement is concrete. Add a same type requirement.
     Requirement Req(RequirementKind::SameType, GP, Replacement);
     Requirements.push_back(Req);
-  }
+  });
 
   // Create a new generic signature by taking the existing one
   // and adding new requirements to it. No need to introduce
@@ -1753,7 +1770,7 @@ checkSpecializationRequirements(ArrayRef<Requirement> Requirements) {
 /// This constructor is used when processing @_specialize.
 ReabstractionInfo::ReabstractionInfo(SILFunction *Callee,
                                      ArrayRef<Requirement> Requirements) {
-  if (shouldNotSpecializeCallee(Callee))
+  if (shouldNotSpecialize(Callee, nullptr))
     return;
 
   // Perform some sanity checks for the requirements.
@@ -1857,7 +1874,7 @@ SILFunction *GenericFuncSpecializer::tryCreateSpecialization() {
           SpecializedF->getGenericEnvironment()) ||
          (!SpecializedF->getLoweredFunctionType()->isPolymorphic() &&
           !SpecializedF->getGenericEnvironment()));
-  assert(!SpecializedF->hasQualifiedOwnership());
+  assert(!SpecializedF->hasOwnership());
   // Check if this specialization should be linked for prespecialization.
   linkSpecialization(M, SpecializedF);
   // Store the meta-information about how this specialization was created.
@@ -1975,7 +1992,7 @@ static ApplySite replaceWithSpecializedCallee(ApplySite AI,
       Builder.setInsertionPoint(ResultBB->begin());
       fixUsedVoidType(ResultBB->getArgument(0), Loc, Builder);
 
-      SILArgument *Arg = ResultBB->replacePHIArgument(
+      SILArgument *Arg = ResultBB->replacePhiArgument(
           0, StoreResultTo->getType().getObjectType(),
           ValueOwnershipKind::Owned);
       // Store the direct result to the original result address.
@@ -2087,7 +2104,7 @@ protected:
 SILFunction *ReabstractionThunkGenerator::createThunk() {
   SILFunction *Thunk = FunctionBuilder.getOrCreateSharedFunction(
       Loc, ThunkName, ReInfo.getSubstitutedType(), IsBare, IsTransparent,
-      Serialized, ProfileCounter(), IsThunk);
+      Serialized, ProfileCounter(), IsThunk, IsNotDynamic);
   // Re-use an existing thunk.
   if (!Thunk->empty())
     return Thunk;
@@ -2110,8 +2127,8 @@ SILFunction *ReabstractionThunkGenerator::createThunk() {
   // inline qualified into unqualified functions /or/ have the
   // OwnershipModelEliminator run as part of the normal compilation pipeline
   // (which we are not doing yet).
-  if (!SpecializedFunc->hasQualifiedOwnership()) {
-    Thunk->setUnqualifiedOwnership();
+  if (!SpecializedFunc->hasOwnership()) {
+    Thunk->setOwnershipEliminated();
   }
 
   if (!SILModuleConventions(M).useLoweredAddresses()) {
@@ -2156,12 +2173,12 @@ SILValue ReabstractionThunkGenerator::createReabstractionThunkApply(
   SILBasicBlock *NormalBB = Thunk->createBasicBlock();
   SILBasicBlock *ErrorBB = Thunk->createBasicBlock();
   Builder.createTryApply(Loc, FRI, Subs, Arguments, NormalBB, ErrorBB);
-  auto *ErrorVal = ErrorBB->createPHIArgument(
+  auto *ErrorVal = ErrorBB->createPhiArgument(
       SpecializedFunc->mapTypeIntoContext(specConv.getSILErrorType()),
       ValueOwnershipKind::Owned);
   Builder.setInsertionPoint(ErrorBB);
   Builder.createThrow(Loc, ErrorVal);
-  SILValue ReturnValue = NormalBB->createPHIArgument(
+  SILValue ReturnValue = NormalBB->createPhiArgument(
       SpecializedFunc->mapTypeIntoContext(specConv.getSILResultType()),
       ValueOwnershipKind::Owned);
   Builder.setInsertionPoint(NormalBB);
@@ -2271,7 +2288,7 @@ void swift::trySpecializeApplyOfGeneric(
   if (F->isSerialized() && !RefF->hasValidLinkageForFragileInline())
       return;
 
-  if (shouldNotSpecializeCallee(RefF))
+  if (shouldNotSpecialize(RefF, F))
     return;
 
   // If the caller and callee are both fragile, preserve the fragility when
@@ -2348,7 +2365,7 @@ void swift::trySpecializeApplyOfGeneric(
                             << SpecializedF->getName() << "\n"
                             << "Specialized function type: "
                             << SpecializedF->getLoweredFunctionType() << "\n");
-    assert(!SpecializedF->hasQualifiedOwnership());
+    assert(!SpecializedF->hasOwnership());
     NewFunctions.push_back(SpecializedF);
   }
 
@@ -2477,7 +2494,6 @@ static const char *const KnownPrespecializations[] = {
     "UTF16",
     "String",
     "_StringBuffer",
-    "_toStringReadOnlyPrintable",
 };
 
 bool swift::isKnownPrespecialization(StringRef SpecName) {

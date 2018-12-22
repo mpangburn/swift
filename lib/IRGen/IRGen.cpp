@@ -740,7 +740,7 @@ void swift::irgen::deleteIRGenModule(
   delete IRGenPair.first;
 }
 
-/// \brief Run the IRGen preparation SIL pipeline. Passes have access to the
+/// Run the IRGen preparation SIL pipeline. Passes have access to the
 /// IRGenModule.
 static void runIRGenPreparePasses(SILModule &Module,
                                   irgen::IRGenModule &IRModule) {
@@ -762,15 +762,12 @@ static void runIRGenPreparePasses(SILModule &Module,
 
 /// Generates LLVM IR, runs the LLVM passes and produces the output file.
 /// All this is done in a single thread.
-static std::unique_ptr<llvm::Module> performIRGeneration(IRGenOptions &Opts,
-                                                         swift::ModuleDecl *M,
-                                            std::unique_ptr<SILModule> SILMod,
-                                                         StringRef ModuleName,
-                                              const PrimarySpecificPaths &PSPs,
-                                                 llvm::LLVMContext &LLVMContext,
-                                                       SourceFile *SF = nullptr,
-                                 llvm::GlobalVariable **outModuleHash = nullptr,
-                                                       unsigned StartElem = 0) {
+static std::unique_ptr<llvm::Module>
+performIRGeneration(IRGenOptions &Opts, ModuleDecl *M,
+                    std::unique_ptr<SILModule> SILMod, StringRef ModuleName,
+                    const PrimarySpecificPaths &PSPs,
+                    llvm::LLVMContext &LLVMContext, SourceFile *SF = nullptr,
+                    llvm::GlobalVariable **outModuleHash = nullptr) {
   auto &Ctx = M->getASTContext();
   assert(!Ctx.hadError());
 
@@ -795,13 +792,12 @@ static std::unique_ptr<llvm::Module> performIRGeneration(IRGenOptions &Opts,
     irgen.emitGlobalTopLevel();
 
     if (SF) {
-      IGM.emitSourceFile(*SF, StartElem);
+      IGM.emitSourceFile(*SF);
     } else {
-      assert(StartElem == 0 && "no explicit source file provided");
       for (auto *File : M->getFiles()) {
         if (auto *nextSF = dyn_cast<SourceFile>(File)) {
           if (nextSF->ASTStage >= SourceFile::TypeChecked)
-            IGM.emitSourceFile(*nextSF, 0);
+            IGM.emitSourceFile(*nextSF);
         } else {
           File->collectLinkLibraries([&IGM](LinkLibrary LinkLib) {
             IGM.addLinkLibrary(LinkLib);
@@ -826,6 +822,7 @@ static std::unique_ptr<llvm::Module> performIRGeneration(IRGenOptions &Opts,
       IGM.emitBuiltinReflectionMetadata();
       IGM.emitReflectionMetadataVersion();
       irgen.emitEagerClassInitialization();
+      irgen.emitDynamicReplacements();
     }
 
     // Emit symbols for eliminated dead methods.
@@ -972,7 +969,7 @@ static void performParallelIRGeneration(
   for (auto *File : M->getFiles()) {
     if (auto *SF = dyn_cast<SourceFile>(File)) {
       IRGenModule *IGM = irgen.getGenModule(SF);
-      IGM->emitSourceFile(*SF, 0);
+      IGM->emitSourceFile(*SF);
     } else {
       File->collectLinkLibraries([&](LinkLibrary LinkLib) {
         irgen.getPrimaryIGM()->addLinkLibrary(LinkLib);
@@ -984,6 +981,8 @@ static void performParallelIRGeneration(
   irgen.emitLazyDefinitions();
 
   irgen.emitSwiftProtocols();
+
+  irgen.emitDynamicReplacements();
 
   irgen.emitProtocolConformances();
 
@@ -1010,7 +1009,7 @@ static void performParallelIRGeneration(
                   PrimaryGM->addLinkLibrary(linkLib);
                 });
   
-  llvm::StringSet<> referencedGlobals;
+  llvm::DenseSet<StringRef> referencedGlobals;
 
   for (auto it = irgen.begin(); it != irgen.end(); ++it) {
     IRGenModule *IGM = it->second;
@@ -1116,12 +1115,10 @@ performIRGeneration(IRGenOptions &Opts, SourceFile &SF,
                     std::unique_ptr<SILModule> SILMod,
                     StringRef ModuleName, const PrimarySpecificPaths &PSPs,
                     llvm::LLVMContext &LLVMContext,
-                    unsigned StartElem,
                     llvm::GlobalVariable **outModuleHash) {
-  return ::performIRGeneration(Opts, SF.getParentModule(),
-                               std::move(SILMod), ModuleName,
-                               PSPs,
-                               LLVMContext, &SF, outModuleHash, StartElem);
+  return ::performIRGeneration(Opts, SF.getParentModule(), std::move(SILMod),
+                               ModuleName, PSPs, LLVMContext, &SF,
+                               outModuleHash);
 }
 
 void

@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 ///
 ///  \file
-///  \brief This file provides implementations of a few helper functions
+///  This file provides implementations of a few helper functions
 ///  which provide abstracted entrypoints to the SILPasses stage.
 ///
 ///  \note The actual SIL passes should be implemented in per-pass source files,
@@ -82,9 +82,6 @@ static void addDefiniteInitialization(SILPassPipelinePlan &P) {
 static void addMandatoryOptPipeline(SILPassPipelinePlan &P,
                                     const SILOptions &Options) {
   P.startPipeline("Guaranteed Passes");
-  if (Options.EnableMandatorySemanticARCOpts) {
-    P.addSemanticARCOpts();
-  }
   P.addDiagnoseStaticExclusivity();
   P.addCapturePromotion();
 
@@ -95,6 +92,16 @@ static void addMandatoryOptPipeline(SILPassPipelinePlan &P,
   P.addAllocBoxToStack();
   P.addNoReturnFolding();
   addDefiniteInitialization(P);
+  // Only run semantic arc opts if we are optimizing and if mandatory semantic
+  // arc opts is explicitly enabled.
+  //
+  // NOTE: Eventually this pass will be split into a mandatory/more aggressive
+  // pass. This will happen when OSSA is no longer eliminated before the
+  // optimizer pipeline is run implying we can put a pass that requires OSSA
+  // there.
+  if (Options.EnableMandatorySemanticARCOpts && Options.shouldOptimize()) {
+    P.addSemanticARCOpts();
+  }
   P.addClosureLifetimeFixup();
   P.addOwnershipModelEliminator();
   P.addMandatoryInlining();
@@ -195,6 +202,7 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
   P.addSimplifyCFG();
   // Optimize access markers for better LICM: might merge accesses
   // It will also set the no_nested_conflict for dynamic accesses
+  P.addAccessEnforcementReleaseSinking();
   P.addAccessEnforcementOpts();
   P.addHighLevelLICM();
   // Simplify CFG after LICM that creates new exit blocks
@@ -202,6 +210,7 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
   // LICM might have added new merging potential by hoisting
   // we don't want to restart the pipeline - ignore the
   // potential of merging out of two loops
+  P.addAccessEnforcementReleaseSinking();
   P.addAccessEnforcementOpts();
   // Start of loop unrolling passes.
   P.addArrayCountPropagation();
@@ -213,7 +222,6 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
   P.addSimplifyCFG();
   P.addArrayElementPropagation();
   // End of unrolling passes.
-  P.addRemovePins();
   P.addABCOpt();
   // Cleanup.
   P.addDCE();
@@ -224,7 +232,8 @@ void addHighLevelLoopOptPasses(SILPassPipelinePlan &P) {
 }
 
 // Perform classic SSA optimizations.
-void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
+void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel,
+                  bool stopAfterSerialization = false) {
   // Promote box allocations to stack allocations.
   P.addAllocBoxToStack();
 
@@ -246,6 +255,9 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
 
   // Promote stack allocations to values.
   P.addMem2Reg();
+
+  // Run the existential specializer Pass.
+  P.addExistentialSpecializer();
 
   // Cleanup, which is important if the inliner has restarted the pass pipeline.
   P.addPerformanceConstantPropagation();
@@ -278,6 +290,9 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
     // which reduces the ability of the compiler to optimize clients
     // importing this module.
     P.addSerializeSILPass();
+    if (stopAfterSerialization)
+      return;
+
     // Does inline semantics-functions (except "availability"), but not
     // global-init functions.
     P.addPerfInliner();
@@ -303,7 +318,14 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
   P.addSimplifyCFG();
 
   P.addCSE();
-  P.addRedundantLoadElimination();
+  if (OpLevel == OptimizationLevelKind::HighLevel) {
+    // Early RLE does not touch loads from Arrays. This is important because
+    // later array optimizations, like ABCOpt, get confused if an array load in
+    // a loop is converted to a pattern with a phi argument.
+    P.addEarlyRedundantLoadElimination();
+  } else {
+    P.addRedundantLoadElimination();
+  }
 
   P.addPerformanceConstantPropagation();
   P.addCSE();
@@ -331,7 +353,6 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
   P.addRetainSinking();
   P.addReleaseHoisting();
   P.addARCSequenceOpts();
-  P.addRemovePins();
 }
 
 static void addPerfDebugSerializationPipeline(SILPassPipelinePlan &P) {
@@ -374,9 +395,12 @@ static void addMidModulePassesStackPromotePassPipeline(SILPassPipelinePlan &P) {
   P.addStackPromotion();
 }
 
-static void addMidLevelPassPipeline(SILPassPipelinePlan &P) {
+static bool addMidLevelPassPipeline(SILPassPipelinePlan &P,
+                                    bool stopAfterSerialization) {
   P.startPipeline("MidLevel");
-  addSSAPasses(P, OptimizationLevelKind::MidLevel);
+  addSSAPasses(P, OptimizationLevelKind::MidLevel, stopAfterSerialization);
+  if (stopAfterSerialization)
+    return true;
 
   // Specialize partially applied functions with dead arguments as a preparation
   // for CapturePropagation.
@@ -385,6 +409,7 @@ static void addMidLevelPassPipeline(SILPassPipelinePlan &P) {
   // Run loop unrolling after inlining and constant propagation, because loop
   // trip counts may have became constant.
   P.addLoopUnroll();
+  return false;
 }
 
 static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
@@ -457,6 +482,7 @@ static void addLateLoopOptPassPipeline(SILPassPipelinePlan &P) {
   P.addCodeSinking();
   // Optimize access markers for better LICM: might merge accesses
   // It will also set the no_nested_conflict for dynamic accesses
+  P.addAccessEnforcementReleaseSinking();
   P.addAccessEnforcementOpts();
   P.addLICM();
   // Simplify CFG after LICM that creates new exit blocks
@@ -464,6 +490,7 @@ static void addLateLoopOptPassPipeline(SILPassPipelinePlan &P) {
   // LICM might have added new merging potential by hoisting
   // we don't want to restart the pipeline - ignore the
   // potential of merging out of two loops
+  P.addAccessEnforcementReleaseSinking();
   P.addAccessEnforcementOpts();
 
   // Optimize overflow checks.
@@ -486,8 +513,13 @@ static void addLateLoopOptPassPipeline(SILPassPipelinePlan &P) {
 // - don't require IRGen information.
 static void addLastChanceOptPassPipeline(SILPassPipelinePlan &P) {
   // Optimize access markers for improved IRGen after all other optimizations.
+  P.addAccessEnforcementReleaseSinking();
   P.addAccessEnforcementOpts();
   P.addAccessEnforcementWMO();
+  P.addAccessEnforcementDom();
+  // addAccessEnforcementDom might provide potential for LICM:
+  // A loop might have only one dynamic access now, i.e. hoistable
+  P.addLICM();
 
   // Only has an effect if the -assume-single-thread option is specified.
   P.addAssumeSingleThreaded();
@@ -557,7 +589,8 @@ SILPassPipelinePlan::getPerformancePassPipeline(const SILOptions &Options) {
   addMidModulePassesStackPromotePassPipeline(P);
 
   // Run an iteration of the mid-level SSA passes.
-  addMidLevelPassPipeline(P);
+  if (addMidLevelPassPipeline(P, Options.StopOptimizationAfterSerialization))
+    return P;
 
   // Perform optimizations that specialize.
   addClosureSpecializePassPipeline(P);

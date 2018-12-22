@@ -42,6 +42,7 @@ set(SWIFT_BENCH_MODULES
     single-source/BinaryFloatingPointConversionFromBinaryInteger
     single-source/BinaryFloatingPointProperties
     single-source/BitCount
+    single-source/Breadcrumbs
     single-source/ByteSwap
     single-source/COWTree
     single-source/COWArrayGuaranteedParameterOverhead
@@ -55,7 +56,9 @@ set(SWIFT_BENCH_MODULES
     single-source/CharacterProperties
     single-source/Chars
     single-source/ClassArrayGetter
+    single-source/Codable
     single-source/Combos
+    single-source/CountAlgo
     single-source/DataBenchmarks
     single-source/DeadArray
     single-source/DictOfArraysToArrayOfDicts
@@ -71,6 +74,7 @@ set(SWIFT_BENCH_MODULES
     single-source/DictionaryGroup
     single-source/DictionaryKeysContains
     single-source/DictionaryLiteral
+    single-source/DictionaryOfAnyHashableStrings
     single-source/DictionaryRemove
     single-source/DictionarySubscriptDefault
     single-source/DictionarySwap
@@ -82,11 +86,13 @@ set(SWIFT_BENCH_MODULES
     single-source/Exclusivity
     single-source/ExistentialPerformance
     single-source/Fibonacci
+    single-source/FlattenList
     single-source/FloatingPointPrinting
     single-source/Hanoi
     single-source/Hash
     single-source/HashQuadratic
     single-source/Histogram
+    single-source/InsertCharacter  
     single-source/Integrate
     single-source/IterateData
     single-source/Join
@@ -169,16 +175,13 @@ set(SWIFT_BENCH_MODULES
     single-source/XorLoop
 )
 
-set(SWIFT_MULTISOURCE_SWIFT3_BENCHES
+set(SWIFT_MULTISOURCE_SWIFT_BENCHES
   multi-source/PrimsSplit
 )
 
 set(PrimsSplit_sources
     multi-source/PrimsSplit/Prims.swift
     multi-source/PrimsSplit/Prims_main.swift)
-
-set(SWIFT_MULTISOURCE_SWIFT4_BENCHES
-)
 
 set(BENCH_DRIVER_LIBRARY_FLAGS)
 if (SWIFT_RUNTIME_ENABLE_LEAK_CHECKER)

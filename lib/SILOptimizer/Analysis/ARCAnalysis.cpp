@@ -87,11 +87,6 @@ bool swift::mayDecrementRefCount(SILInstruction *User,
   return true;
 }
 
-bool swift::mayCheckRefCount(SILInstruction *User) {
-  return isa<IsUniqueInst>(User) || isa<IsUniqueOrPinnedInst>(User) ||
-         isa<IsEscapingClosureInst>(User);
-}
-
 //===----------------------------------------------------------------------===//
 //                                Use Analysis
 //===----------------------------------------------------------------------===//
@@ -136,6 +131,8 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   switch (Inst->getKind()) {
   // These instructions do not use other values.
   case SILInstructionKind::FunctionRefInst:
+  case SILInstructionKind::DynamicFunctionRefInst:
+  case SILInstructionKind::PreviousDynamicFunctionRefInst:
   case SILInstructionKind::IntegerLiteralInst:
   case SILInstructionKind::FloatLiteralInst:
   case SILInstructionKind::StringLiteralInst:
@@ -662,7 +659,7 @@ findMatchingRetains(SILBasicBlock *BB) {
 
       // If this is a SILArgument of current basic block, we can split it up to
       // values in the predecessors.
-      auto *SA = dyn_cast<SILPHIArgument>(R.second);
+      auto *SA = dyn_cast<SILPhiArgument>(R.second);
       if (SA && SA->getParent() != R.first)
         SA = nullptr;
 
@@ -670,10 +667,9 @@ findMatchingRetains(SILBasicBlock *BB) {
         if (HandledBBs.find(X) != HandledBBs.end())
           continue;
         // Try to use the predecessor edge-value.
-        if (SA && SA->getIncomingValue(X)) {
-          WorkList.push_back(std::make_pair(X, SA->getIncomingValue(X)));
-        }
-        else 
+        if (SA && SA->getIncomingPhiValue(X)) {
+          WorkList.push_back(std::make_pair(X, SA->getIncomingPhiValue(X)));
+        } else
           WorkList.push_back(std::make_pair(X, R.second));
    
         HandledBBs.insert(X);
@@ -1059,7 +1055,7 @@ bool swift::getFinalReleasesForValue(SILValue V, ReleaseTracker &Tracker) {
 
     // Try to speed up the trivial case of single release/dealloc.
     if (isa<StrongReleaseInst>(User) || isa<DeallocBoxInst>(User) ||
-        isa<DestroyValueInst>(User)) {
+        isa<DestroyValueInst>(User) || isa<ReleaseValueInst>(User)) {
       if (!seenRelease)
         OneRelease = User;
       else
@@ -1093,11 +1089,8 @@ bool swift::getFinalReleasesForValue(SILValue V, ReleaseTracker &Tracker) {
 //===----------------------------------------------------------------------===//
 
 static bool ignorableApplyInstInUnreachableBlock(const ApplyInst *AI) {
-  const auto *Fn = AI->getReferencedFunction();
-  if (!Fn)
-    return false;
-
-  return Fn->hasSemanticsAttr("arc.programtermination_point");
+  auto applySite = FullApplySite(const_cast<ApplyInst *>(AI));
+  return applySite.isCalleeKnownProgramTerminationPoint();
 }
 
 static bool ignorableBuiltinInstInUnreachableBlock(const BuiltinInst *BI) {

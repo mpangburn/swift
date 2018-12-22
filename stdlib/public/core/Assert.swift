@@ -122,7 +122,7 @@ public func precondition(
 ///     where `assertionFailure(_:file:line:)` is called.
 ///   - line: The line number to print along with `message`. The default is the
 ///     line number where `assertionFailure(_:file:line:)` is called.
-@inlinable // FIXME(sil-serialize-all)
+@inlinable
 @inline(__always)
 public func assertionFailure(
   _ message: @autoclosure () -> String = String(),
@@ -285,7 +285,7 @@ internal func _debugPreconditionFailure(
 /// with the build configuration INTERNAL_CHECKS_ENABLED enabled. Otherwise, the
 /// call to this function is a noop.
 @usableFromInline @_transparent
-internal func _sanityCheck(
+internal func _internalInvariant(
   _ condition: @autoclosure () -> Bool, _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) {
@@ -298,10 +298,10 @@ internal func _sanityCheck(
 }
 
 @usableFromInline @_transparent
-internal func _sanityCheckFailure(
+internal func _internalInvariantFailure(
   _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) -> Never {
-  _sanityCheck(false, message, file: file, line: line)
+  _internalInvariant(false, message, file: file, line: line)
   _conditionallyUnreachable()
 }

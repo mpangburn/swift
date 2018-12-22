@@ -25,6 +25,8 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/SILVisitor.h"
+#include "swift/SILOptimizer/Analysis/ClassHierarchyAnalysis.h"
+#include "swift/SILOptimizer/Analysis/ProtocolConformanceAnalysis.h"
 #include "swift/SILOptimizer/Utils/CastOptimizer.h"
 #include "swift/SILOptimizer/Utils/Existential.h"
 #include "swift/SILOptimizer/Utils/Local.h"
@@ -118,6 +120,14 @@ class SILCombiner :
 
   DominanceAnalysis *DA;
 
+  // Determine the set of types a protocol conforms to in whole-module
+  // compilation mode.
+  ProtocolConformanceAnalysis *PCA;
+
+  // Class hierarchy analysis needed to confirm no derived classes of a sole
+  // conforming class.
+  ClassHierarchyAnalysis *CHA;
+
   /// Worklist containing all of the instructions primed for simplification.
   SILCombineWorklist Worklist;
 
@@ -139,8 +149,9 @@ class SILCombiner :
 public:
   SILCombiner(SILOptFunctionBuilder &FuncBuilder,
               SILBuilder &B, AliasAnalysis *AA, DominanceAnalysis *DA,
+              ProtocolConformanceAnalysis *PCA, ClassHierarchyAnalysis *CHA,
               bool removeCondFails)
-      : AA(AA), DA(DA), Worklist(), MadeChange(false),
+      : AA(AA), DA(DA), PCA(PCA), CHA(CHA), Worklist(), MadeChange(false),
         RemoveCondFails(removeCondFails), Iteration(0), Builder(B),
         CastOpt(FuncBuilder,
                 /* ReplaceInstUsesAction */
@@ -284,21 +295,44 @@ public:
 private:
   FullApplySite rewriteApplyCallee(FullApplySite apply, SILValue callee);
 
-  SILInstruction *createApplyWithConcreteType(FullApplySite Apply,
-                                              const ConcreteExistentialInfo &CEI,
-                                              SILBuilderContext &BuilderCtx);
+  // Build concrete existential information using findInitExistential.
+  Optional<ConcreteExistentialInfo>
+  buildConcreteExistentialInfo(Operand &ArgOperand);
+
+  // Build concrete existential information using SoleConformingType.
+  Optional<ConcreteExistentialInfo>
+  buildConcreteExistentialInfoFromSoleConformingType(Operand &ArgOperand);
+
+  // Common utility function to build concrete existential information for all
+  // arguments of an apply instruction.
+  void buildConcreteExistentialInfos(
+      FullApplySite Apply,
+      llvm::SmallDenseMap<unsigned, ConcreteExistentialInfo> &CEIs,
+      SILBuilderContext &BuilderCtx,
+      SILOpenedArchetypesTracker &OpenedArchetypesTracker);
+
+  bool canReplaceArg(FullApplySite Apply, const ConcreteExistentialInfo &CEI,
+                     unsigned ArgIdx);
+  SILInstruction *createApplyWithConcreteType(
+      FullApplySite Apply,
+      const llvm::SmallDenseMap<unsigned, ConcreteExistentialInfo> &CEIs,
+      SILBuilderContext &BuilderCtx);
+
+  // Common utility function to replace the WitnessMethodInst using a
+  // BuilderCtx.
+  void replaceWitnessMethodInst(WitnessMethodInst *WMI,
+                                SILBuilderContext &BuilderCtx,
+                                CanType ConcreteType,
+                                const ProtocolConformanceRef ConformanceRef);
 
   SILInstruction *
   propagateConcreteTypeOfInitExistential(FullApplySite Apply,
                                          WitnessMethodInst *WMI);
   SILInstruction *propagateConcreteTypeOfInitExistential(FullApplySite Apply);
 
-  // Common utility function to replace the WitnessMethodInst using a
-  // BuilderCtx.
-  void replaceWitnessMethodInst(FullApplySite Apply, WitnessMethodInst *WMI,
-                                SILBuilderContext &BuilderCtx,
-                                const CanType &ConcreteType,
-                                const ProtocolConformanceRef ConformanceRef);
+  /// Propagate concrete types from ProtocolConformanceAnalysis.
+  SILInstruction *propagateSoleConformingType(FullApplySite Apply,
+                                              WitnessMethodInst *WMI);
 
   /// Perform one SILCombine iteration.
   bool doOneIteration(SILFunction &F, unsigned Iteration);
@@ -309,7 +343,7 @@ private:
 
   typedef SmallVector<SILInstruction*, 4> UserListTy;
 
-  /// \brief Returns a list of instructions that project or perform reference
+  /// Returns a list of instructions that project or perform reference
   /// counting operations on \p Value or on its uses.
   /// \return return false if \p Value has other than ARC uses.
   static bool recursivelyCollectARCUsers(UserListTy &Uses, ValueBase *Value);

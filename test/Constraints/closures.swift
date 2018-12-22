@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift -swift-version 4
+// RUN: %target-typecheck-verify-swift
 
 func myMap<T1, T2>(_ array: [T1], _ fn: (T1) -> T2) -> [T2] {}
 
@@ -356,7 +356,7 @@ func f19997471(_ x: Int) {}
 func someGeneric19997471<T>(_ x: T) {
   takeVoidVoidFn {
     f19997471(x) // expected-error {{cannot invoke 'f19997471' with an argument list of type '(T)'}}
-    // expected-note @-1 {{overloads for 'f19997471' exist with these partially matching parameter lists: (String), (Int)}}
+    // expected-note @-1 {{overloads for 'f19997471' exist with these partially matching parameter lists: (Int), (String)}}
   }
 }
 
@@ -497,8 +497,8 @@ sr3520_1 { $0 = 1 } // expected-error {{cannot convert value of type '()' to clo
 struct S_3520 {
   var number1: Int
 }
-func sr3520_set_via_closure<S, T>(_ closure: (inout S, T) -> ()) {}
-sr3520_set_via_closure({ $0.number1 = $1 }) // expected-error {{type of expression is ambiguous without more context}}
+func sr3520_set_via_closure<S, T>(_ closure: (inout S, T) -> ()) {} // expected-note {{in call to function 'sr3520_set_via_closure'}}
+sr3520_set_via_closure({ $0.number1 = $1 }) // expected-error {{generic parameter 'S' could not be inferred}}
 
 // SR-3073: UnresolvedDotExpr in single expression closure
 
@@ -539,6 +539,15 @@ _ = ["hi"].compactMap { $0.isEmpty ? nil : $0 }
 // rdar://problem/32432145 - compiler should emit fixit to remove "_ in" in closures if 0 parameters is expected
 
 func r32432145(_ a: () -> ()) {}
+
+r32432145 { _ in let _ = 42 }
+// expected-error@-1 {{contextual closure type '() -> ()' expects 0 arguments, but 1 was used in closure body}} {{13-17=}}
+
+r32432145 { _ in
+  // expected-error@-1 {{contextual closure type '() -> ()' expects 0 arguments, but 1 was used in closure body}} {{13-17=}}
+  print("answer is 42")
+}
+
 r32432145 { _,_ in
   // expected-error@-1 {{contextual closure type '() -> ()' expects 0 arguments, but 2 were used in closure body}} {{13-19=}}
   print("answer is 42")
@@ -733,3 +742,119 @@ func takesTwoInOut(_: (Int, inout Int) -> ()) {}
 
 takesTwo { _ in } // expected-error {{contextual closure type '(Int, Int) -> ()' expects 2 arguments, but 1 was used in closure body}}
 takesTwoInOut { _ in } // expected-error {{contextual closure type '(Int, inout Int) -> ()' expects 2 arguments, but 1 was used in closure body}}
+
+// <rdar://problem/20371273> Type errors inside anonymous functions don't provide enough information
+func f20371273() {
+  let x: [Int] = [1, 2, 3, 4]
+  let y: UInt = 4
+  _ = x.filter { ($0 + y)  > 42 } // expected-error {{binary operator '+' cannot be applied to operands of type 'Int' and 'UInt'}} expected-note {{overloads for '+' exist with these partially matching parameter lists: (Int, Int), (UInt, UInt)}}
+}
+
+// rdar://problem/42337247
+
+func overloaded(_ handler: () -> Int) {} // expected-note {{found this candidate}}
+func overloaded(_ handler: () -> Void) {} // expected-note {{found this candidate}}
+
+overloaded { } // empty body => inferred as returning ()
+
+overloaded { print("hi") } // single-expression closure => typechecked with body
+
+overloaded { print("hi"); print("bye") } // multiple expression closure without explicit returns; can default to any return type
+// expected-error@-1 {{ambiguous use of 'overloaded'}}
+
+func not_overloaded(_ handler: () -> Int) {}
+
+not_overloaded { } // empty body
+// expected-error@-1 {{cannot convert value of type '() -> ()' to expected argument type '() -> Int'}}
+
+not_overloaded { print("hi") } // single-expression closure
+// expected-error@-1 {{cannot convert value of type '()' to closure result type 'Int'}}
+
+// no error in -typecheck, but dataflow diagnostics will complain about missing return
+not_overloaded { print("hi"); print("bye") } // multiple expression closure
+
+func apply(_ fn: (Int) throws -> Int) rethrows -> Int {
+  return try fn(0)
+}
+
+enum E : Error {
+  case E
+}
+
+func test() -> Int? {
+  return try? apply({ _ in throw E.E })
+}
+
+var fn: () -> [Int] = {}
+// expected-error@-1 {{cannot convert value of type '() -> ()' to specified type '() -> [Int]'}}
+
+fn = {}
+// expected-error@-1 {{cannot assign value of type '() -> ()' to type '() -> [Int]'}}
+
+func test<Instances : Collection>(
+  _ instances: Instances,
+  _ fn: (Instances.Index, Instances.Index) -> Bool
+) { fatalError() }
+
+test([1]) { _, _ in fatalError(); () }
+
+// rdar://problem/40537960 - Misleading diagnostic when using closure with wrong type
+
+protocol P_40537960 {}
+func rdar_40537960() {
+  struct S {
+    var v: String
+  }
+
+  struct L : P_40537960 {
+    init(_: String) {}
+  }
+
+  struct R<T : P_40537960> {
+    init(_: P_40537960) {}
+  }
+
+  struct A<T: Collection, P: P_40537960> {
+    typealias Data = T.Element
+    init(_: T, fn: (Data) -> R<P>) {}
+  }
+
+  var arr: [S] = []
+  _ = A(arr, fn: { L($0.v) }) // expected-error {{cannot convert value of type 'L' to closure result type 'R<T>'}}
+}
+
+// rdar://problem/45659733
+func rdar_45659733() {
+  func foo<T : BinaryInteger>(_: AnyHashable, _: T) {}
+  func bar(_ a: Int, _ b: Int) {
+    _ = (a ..< b).map { i in foo(i, i) } // Ok
+  }
+
+  struct S<V> {
+    func map<T>(
+      get: @escaping (V) -> T,
+      set: @escaping (inout V, T) -> Void
+    ) -> S<T> {
+      fatalError()
+    }
+
+    subscript<T>(
+      keyPath: WritableKeyPath<V, T?>,
+      default defaultValue: T
+    ) -> S<T> {
+      return map(
+        get: { $0[keyPath: keyPath] ?? defaultValue },
+        set: { $0[keyPath: keyPath] = $1 }
+      ) // Ok, make sure that we deduce result to be S<T>
+    }
+  }
+}
+
+func rdar45771997() {
+  struct S {
+    mutating func foo() {}
+  }
+
+  let _: Int = { (s: inout S) in s.foo() }
+  // expected-error@-1 {{cannot convert value of type '(inout S) -> ()' to specified type 'Int'}}
+}

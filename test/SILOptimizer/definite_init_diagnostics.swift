@@ -432,18 +432,18 @@ class DelegatingCtorClass {
   }
   
   convenience init(x: EmptyStruct, y: EmptyStruct) {
-    _ = ivar       // expected-error {{'self' used in property access 'ivar' before 'self.init' call}}
-    ivar = x       // expected-error {{'self' used in property access 'ivar' before 'self.init' call}}
+    _ = ivar       // expected-error {{'self' used before 'self.init' call}}
+    ivar = x       // expected-error {{'self' used before 'self.init' call}}
     self.init()
   }
 
   convenience init(x: EmptyStruct, y: EmptyStruct, z: EmptyStruct) {
     self.init()
-    self.init()    // expected-error {{'self.init' called multiple times in initializer}}
+    self.init()
   }
 
   convenience init(x: (EmptyStruct, EmptyStruct)) {
-    method()       // expected-error {{'self' used in method call 'method' before 'self.init' call}}
+    method()       // expected-error {{'self' used before 'self.init' call}}
     self.init()
   }
 
@@ -561,10 +561,10 @@ func testNoReturn3(_ b : Bool) -> Any {
 
   switch b {
   default:
-    PerpetualMotion().start()
+    PerpetualMotion().start() // expected-note {{a call to a never-returning function}}
   }
 
-  return a
+  return a // expected-warning {{will never be executed}}
 }
 
 func testNoReturn4(_ b : Bool) -> Any {
@@ -572,10 +572,10 @@ func testNoReturn4(_ b : Bool) -> Any {
 
   switch b {
   default:
-    PerpetualMotion.stop()
+    PerpetualMotion.stop() // expected-note {{a call to a never-returning function}}
   }
 
-  return a
+  return a // expected-warning {{will never be executed}}
 }
 
 
@@ -1247,8 +1247,8 @@ class SuperConvenienceSub : SuperConvenienceBase {
     super.init(i)
   }
   public init(_ i1: Int, _ i2: Int, _ i3: Int) {
-    self.init(i1, i1)
-  }
+    self.init(i1, i1) // expected-error{{'self' used before 'super.init' call}}
+  } // expected-error{{'super.init' isn't called}}
 }
 
 // While testing some changes I found this regression that wasn't
@@ -1426,7 +1426,7 @@ func testOptionalWriteGenerics2<T>(p: T) -> T? {
 
 enum TestOptionalEnum {
   case Cons(Int)
-  case Nil()
+  case Nil
 }
 
 func testOptionalWithEnum(p: TestOptionalEnum) -> TestOptionalEnum? {
@@ -1550,4 +1550,32 @@ func testOptionalUnwrapNoError() -> Int? {
   let x: Int?
   x = 0
   return x!
+}
+
+// <https://bugs.swift.org/browse/SR-9451>
+class StrongCycle {
+  var c: StrongCycle
+  var d: Int
+  init(first: ()) {
+    self.d = 10
+    self.c = self // expected-error {{variable 'self.c' used before being initialized}}
+  }
+
+  init(second: ()) {
+    self.c = self // expected-error {{variable 'self.c' used before being initialized}}
+    self.d = 10
+  }
+}
+
+class WeakCycle {
+  weak var c: WeakCycle?
+  var d: Int
+  init(first: ()) { // FIXME: This is inconsistent with the strong reference behavior above
+    self.d = 10
+    self.c = self
+  }
+  init(second: ()) {
+    self.c = self // expected-error {{variable 'self.d' used before being initialized}}
+    self.d = 10
+  }
 }

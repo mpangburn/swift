@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -disable-sil-perf-optzns -O -Xllvm -swiftmergefunc-threshold=0 -emit-ir %s | %FileCheck %s
+// RUN: %target-swift-frontend -disable-sil-perf-optzns -O -Xllvm -swiftmergefunc-threshold=0 -emit-ir %s | %FileCheck %s
 
 // Check that IRGen lowers non-atomic reference counting instructions to
 // proper runtime calls.
@@ -191,22 +191,6 @@ bb0:
   //%r = apply %f (%0) : $@convention(thin) (@owned C) -> @owned C
   strong_release %2 : $Builtin.BridgeObject
   strong_release [nonatomic] %2 : $Builtin.BridgeObject
-  %3 = tuple ()
-  return %3 : $()
-}
-
-// CHECK-LABEL: define {{.*}}@test_nonatomic_pin_unpin
-// CHECK: call {{.*}}@swift_nonatomic_tryPin
-// CHECK: call {{.*}}@swift_nonatomic_unpin
-// CHECK: ret
-sil @test_nonatomic_pin_unpin: $@convention(thin) () -> () {
-bb0:
-  %0 = alloc_ref $C
-  %1 = unchecked_ref_cast %0 : $C to  $Builtin.NativeObject
-  %2 = strong_pin [nonatomic] %1 : $Builtin.NativeObject
-  %f = function_ref @doSomething : $@convention(thin) () -> ()
-  %r = apply %f () : $@convention(thin) () -> ()
-  strong_unpin [nonatomic] %2 : $Optional<Builtin.NativeObject>
   %3 = tuple ()
   return %3 : $()
 }

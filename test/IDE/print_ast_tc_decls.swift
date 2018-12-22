@@ -1072,12 +1072,10 @@ enum d2300_EnumDeclWithValues1 : Int {
 // PASS_COMMON: {{^}}enum d2300_EnumDeclWithValues1 : Int {{{$}}
 // PASS_COMMON-NEXT: {{^}}  case EDV2_First{{$}}
 // PASS_COMMON-NEXT: {{^}}  case EDV2_Second{{$}}
-// PASS_COMMON-NEXT: {{^}}  typealias RawValue = Int
-// PASS_COMMON-NEXT: {{^}}  var hashValue: Int { get }{{$}}
-// PASS_COMMON-NEXT: {{^}}  func hash(into hasher: inout Hasher)
-// PASS_COMMON-NEXT: {{^}}  init?(rawValue: Int){{$}}
-// PASS_COMMON-NEXT: {{^}}  var rawValue: Int { get }{{$}}
-// PASS_COMMON-NEXT: {{^}}}{{$}}
+// PASS_COMMON-DAG: {{^}}  typealias RawValue = Int
+// PASS_COMMON-DAG: {{^}}  init?(rawValue: Int){{$}}
+// PASS_COMMON-DAG: {{^}}  var rawValue: Int { get }{{$}}
+// PASS_COMMON: {{^}}}{{$}}
 
 enum d2400_EnumDeclWithValues2 : Double {
   case EDV3_First = 10
@@ -1086,12 +1084,10 @@ enum d2400_EnumDeclWithValues2 : Double {
 // PASS_COMMON: {{^}}enum d2400_EnumDeclWithValues2 : Double {{{$}}
 // PASS_COMMON-NEXT: {{^}}  case EDV3_First{{$}}
 // PASS_COMMON-NEXT: {{^}}  case EDV3_Second{{$}}
-// PASS_COMMON-NEXT: {{^}}  typealias RawValue = Double
-// PASS_COMMON-NEXT: {{^}}  var hashValue: Int { get }{{$}}
-// PASS_COMMON-NEXT: {{^}}  func hash(into hasher: inout Hasher)
-// PASS_COMMON-NEXT: {{^}}  init?(rawValue: Double){{$}}
-// PASS_COMMON-NEXT: {{^}}  var rawValue: Double { get }{{$}}
-// PASS_COMMON-NEXT: {{^}}}{{$}}
+// PASS_COMMON-DAG: {{^}}  typealias RawValue = Double
+// PASS_COMMON-DAG: {{^}}  init?(rawValue: Double){{$}}
+// PASS_COMMON-DAG: {{^}}  var rawValue: Double { get }{{$}}
+// PASS_COMMON: {{^}}}{{$}}
 
 //===---
 //===--- Custom operator printing.
@@ -1113,7 +1109,7 @@ infix operator %%%
 func %%%(lhs: inout d2601_TestAssignment, rhs: d2601_TestAssignment) -> Int {
   return 0
 }
-// PASS_2500-LABEL: {{^}}infix operator %%%{{$}}
+// PASS_2500-LABEL: {{^}}infix operator %%% : DefaultPrecedence{{$}}
 // PASS_2500: {{^}}func %%% (lhs: inout d2601_TestAssignment, rhs: d2601_TestAssignment) -> Int{{$}}
 
 precedencegroup BoringPrecedence {
@@ -1362,7 +1358,7 @@ protocol ProtocolWithWhereClauseAndAssoc : QuxProtocol where Qux == Int {
 
   // FIXME: this same type requirement with Self should be printed here
   associatedtype A2 : QuxProtocol where A2.Qux == Self
-// PREFER_TYPE_REPR_PRINTING-DAG: {{^}}  associatedtype A2 : QuxProtocol where Self.A2.Qux == Self{{$}}
+// PREFER_TYPE_REPR_PRINTING-DAG: {{^}}  associatedtype A2 : QuxProtocol where Self == Self.A2.Qux{{$}}
 }
 
 #if true

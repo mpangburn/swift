@@ -253,12 +253,16 @@ struct ArgumentInitHelper {
       // argument if we're responsible for it.
     }
     SGF.VarLocs[vd] = SILGenFunction::VarLoc::get(argrv.getValue());
-    if (argrv.getType().isAddress())
-      SGF.B.createDebugValueAddr(loc, argrv.getValue(),
-                                 SILDebugVariable(vd->isLet(), ArgNo));
-    else
-      SGF.B.createDebugValue(loc, argrv.getValue(),
-                             SILDebugVariable(vd->isLet(), ArgNo));
+    SILValue value = argrv.getValue();
+    SILDebugVariable varinfo(vd->isLet(), ArgNo);
+    if (!argrv.getType().isAddress()) {
+      SGF.B.createDebugValue(loc, value, varinfo);
+    } else {
+      if (auto AllocStack = dyn_cast<AllocStackInst>(value))
+        AllocStack->setArgNo(ArgNo);
+      else
+        SGF.B.createDebugValueAddr(loc, value, varinfo);
+    }
   }
 
   void emitParam(ParamDecl *PD) {
@@ -419,6 +423,19 @@ void SILGenFunction::emitProlog(AnyFunctionRef TheClosure,
                                 Type resultType, bool throws) {
   uint16_t ArgNo = emitProlog(paramList, selfParam, resultType,
                               TheClosure.getAsDeclContext(), throws);
+  
+  // Emit an unreachable instruction if a parameter type is
+  // uninhabited
+  if (paramList) {
+    for (auto *param : *paramList) {
+      if (param->getType()->isStructurallyUninhabited()) {
+        SILLocation unreachableLoc(param);
+        unreachableLoc.markAsPrologue();
+        B.createUnreachable(unreachableLoc);
+        break;
+      }
+    }
+  }
 
   // Emit the capture argument variables. These are placed last because they
   // become the first curry level of the SIL function.

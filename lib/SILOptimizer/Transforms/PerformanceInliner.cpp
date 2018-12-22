@@ -12,15 +12,16 @@
 
 #define DEBUG_TYPE "sil-inliner"
 #include "swift/AST/Module.h"
+#include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/OptimizationRemark.h"
 #include "swift/SILOptimizer/Analysis/SideEffectAnalysis.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
+#include "swift/SILOptimizer/Utils/CFG.h"
 #include "swift/SILOptimizer/Utils/Devirtualize.h"
 #include "swift/SILOptimizer/Utils/Generics.h"
 #include "swift/SILOptimizer/Utils/PerformanceInlinerUtils.h"
 #include "swift/SILOptimizer/Utils/SILOptFunctionBuilder.h"
-#include "swift/Strings.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -101,6 +102,11 @@ class SILPerformanceInliner {
     /// specialization for a call.
     GenericSpecializationBenefit = RemovedCallBenefit + 300,
 
+    /// The benefit of inlining an exclusivity-containing callee.
+    /// The exclusivity needs to be: dynamic,
+    /// has no nested conflict and addresses known storage
+    ExclusivityBenefit = RemovedCallBenefit + 300,
+
     /// The benefit of inlining class methods with -Osize.
     /// We only inline very small class methods with -Osize.
     OSizeClassMethodBenefit = 5,
@@ -109,8 +115,14 @@ class SILPerformanceInliner {
     /// increasing the code size.
     TrivialFunctionThreshold = 18,
 
-    /// Configuration for the "soft" caller block limit.
+    /// Configuration for the "soft" caller block limit. When changing, make
+    /// sure you update BlockLimitMaxIntNumerator.
     BlockLimitDenominator = 3000,
+
+    /// Computations with BlockLimitDenominator will overflow with numerators
+    /// >= this value. This equals cbrt(INT_MAX) * cbrt(BlockLimitDenominator);
+    /// we hardcode its value because std::cbrt() is not constexpr.
+    BlockLimitMaxIntNumerator = 18608,
 
     /// No inlining is done if the caller has more than this number of blocks.
     OverallCallerBlockLimit = 400,
@@ -250,8 +262,12 @@ bool SILPerformanceInliner::isProfitableToInline(
   int BaseBenefit = RemovedCallBenefit;
 
   // Osize heuristic.
+  //
+  // As a hack, don't apply this at all to coroutine inlining; avoiding
+  // coroutine allocation overheads is extremely valuable.  There might be
+  // more principled ways of getting this effect.
   bool isClassMethodAtOsize = false;
-  if (OptMode == OptimizationMode::ForSize) {
+  if (OptMode == OptimizationMode::ForSize && !isa<BeginApplyInst>(AI)) {
     // Don't inline into thunks.
     if (AI.getFunction()->isThunk())
       return false;
@@ -293,9 +309,18 @@ bool SILPerformanceInliner::isProfitableToInline(
   SILBasicBlock *CalleeEntry = &Callee->front();
   DominanceOrder domOrder(CalleeEntry, DT, Callee->size());
 
+  // We don't want to blow up code-size
+  // We will only inline if *ALL* dynamic accesses are
+  // known and have no nested conflict
+  bool AllAccessesBeneficialToInline = true;
+
   // Calculate the inlining cost of the callee.
   int CalleeCost = 0;
   int Benefit = 0;
+  // We don’t know if we want to update the benefit with
+  // the exclusivity heuristic or not. We can *only* do that
+  // if AllAccessesBeneficialToInline is true
+  int ExclusivityBenefitWeight = 0;
 
   SubstitutionMap CalleeSubstMap = AI.getSubstitutionMap();
 
@@ -387,6 +412,21 @@ bool SILPerformanceInliner::isProfitableToInline(
       } else if (auto *BI = dyn_cast<BuiltinInst>(&I)) {
         if (BI->getBuiltinInfo().ID == BuiltinValueKind::OnFastPath)
           BlockW.updateBenefit(Benefit, FastPathBuiltinBenefit);
+      } else if (auto *BAI = dyn_cast<BeginAccessInst>(&I)) {
+        if (BAI->getEnforcement() == SILAccessEnforcement::Dynamic) {
+          // The access is dynamic and has no nested conflict
+          // See if the storage location is considered by
+          // access enforcement optimizations
+          AccessedStorage storage =
+              findAccessedStorageNonNested(BAI->getSource());
+          if (BAI->hasNoNestedConflict() &&
+              (storage.isUniquelyIdentified() ||
+               storage.getKind() == AccessedStorage::Class)) {
+            BlockW.updateBenefit(ExclusivityBenefitWeight, ExclusivityBenefit);
+          } else {
+            AllAccessesBeneficialToInline = false;
+          }
+        }
       }
     }
     // Don't count costs in blocks which are dead after inlining.
@@ -400,6 +440,10 @@ bool SILPerformanceInliner::isProfitableToInline(
     } else {
       domOrder.pushChildren(block);
     }
+  }
+
+  if (AllAccessesBeneficialToInline) {
+    Benefit = std::max(Benefit, ExclusivityBenefitWeight);
   }
 
   if (AI.getFunction()->isThunk()) {
@@ -418,10 +462,13 @@ bool SILPerformanceInliner::isProfitableToInline(
   // We reduce the benefit if the caller is too large. For this we use a
   // cubic function on the number of caller blocks. This starts to prevent
   // inlining at about 800 - 1000 caller blocks.
-  int blockMinus =
-    (NumCallerBlocks * NumCallerBlocks) / BlockLimitDenominator *
-                        NumCallerBlocks / BlockLimitDenominator;
-  Benefit -= blockMinus;
+  if (NumCallerBlocks < BlockLimitMaxIntNumerator)
+    Benefit -= 
+      (NumCallerBlocks * NumCallerBlocks) / BlockLimitDenominator *
+                          NumCallerBlocks / BlockLimitDenominator;
+  else
+    // The calculation in the if branch would overflow if we performed it.
+    Benefit = 0;
 
   // If we have profile info - use it for final inlining decision.
   auto *bb = AI.getInstruction()->getParent();
@@ -483,9 +530,9 @@ static Optional<bool> shouldInlineGeneric(FullApplySite AI) {
   // Do not inline @_semantics functions when compiling the stdlib,
   // because they need to be preserved, so that the optimizer
   // can properly optimize a user code later.
-  auto ModuleName = Callee->getModule().getSwiftModule()->getName().str();
+  ModuleDecl *SwiftModule = Callee->getModule().getSwiftModule();
   if (Callee->hasSemanticsAttrThatStartsWith("array.") &&
-      (ModuleName == STDLIB_NAME || ModuleName == SWIFT_ONONE_SUPPORT))
+      (SwiftModule->isStdlibModule() || SwiftModule->isOnoneSupportModule()))
     return false;
 
   // Do not inline into thunks.
@@ -608,6 +655,10 @@ addToBBCounts(llvm::DenseMap<SILBasicBlock *, uint64_t> &BBToWeightMap,
            "Expected to find block in map");
     BBToWeightMap[currBB] += numToAdd;
   }
+}
+
+static bool isInlineAlwaysCallSite(SILFunction *Callee) {
+  return Callee->getInlineStrategy() == AlwaysInline || Callee->isTransparent();
 }
 
 static void
@@ -745,6 +796,23 @@ void SILPerformanceInliner::collectAppliesToInline(
 
       auto *Callee = getEligibleFunction(AI, WhatToInline);
       if (Callee) {
+        // Check if we have an always_inline or transparent function. If we do,
+        // just add it to our final Applies list and continue.
+        if (isInlineAlwaysCallSite(Callee)) {
+          NumCallerBlocks += Callee->size();
+          Applies.push_back(AI);
+          continue;
+        }
+
+        // Next make sure that we do not have more blocks than our overall
+        // caller block limit at this point. In such a case, we continue. This
+        // will ensure that any further non inline always functions are skipped,
+        // but we /do/ inline any inline_always functions remaining.
+        if (NumCallerBlocks > OverallCallerBlockLimit)
+          continue;
+
+        // Otherwise, calculate our block weights and determine if we want to
+        // inline this.
         if (!BlockWeight.isValid())
           BlockWeight = SPA->getWeight(block, Weight(0, 0));
 
@@ -756,8 +824,6 @@ void SILPerformanceInliner::collectAppliesToInline(
           InitialCandidates.push_back(AI);
       }
     }
-    if (NumCallerBlocks > OverallCallerBlockLimit)
-      break;
 
     domOrder.pushChildrenIf(block, [&] (SILBasicBlock *child) {
       if (CBI.isSlowPath(block, child)) {
@@ -790,7 +856,7 @@ void SILPerformanceInliner::collectAppliesToInline(
   }
 }
 
-/// \brief Attempt to inline all calls smaller than our threshold.
+/// Attempt to inline all calls smaller than our threshold.
 /// returns True if a function was inlined.
 bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller) {
   // Don't optimize functions that are marked with the opt.never attribute.
@@ -825,27 +891,26 @@ bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller) {
                             << "] " << Callee->getName() << "\n");
 
     SILOpenedArchetypesTracker OpenedArchetypesTracker(Caller);
-    Caller->getModule().registerDeleteNotificationHandler(&OpenedArchetypesTracker);
+    Caller->getModule().registerDeleteNotificationHandler(
+        &OpenedArchetypesTracker);
     // The callee only needs to know about opened archetypes used in
     // the substitution list.
     OpenedArchetypesTracker.registerUsedOpenedArchetypes(AI.getInstruction());
 
-    SILInliner Inliner(FuncBuilder, *Caller, *Callee,
-                       SILInliner::InlineKind::PerformanceInline,
-                       AI.getSubstitutionMap(),
-                       OpenedArchetypesTracker);
+    SILInliner Inliner(FuncBuilder, SILInliner::InlineKind::PerformanceInline,
+                       AI.getSubstitutionMap(), OpenedArchetypesTracker);
 
     // We've already determined we should be able to inline this, so
     // unconditionally inline the function.
     //
     // If for whatever reason we can not inline this function, inlineFunction
     // will assert, so we are safe making this assumption.
-    Inliner.inlineFunction(AI, Args);
-    recursivelyDeleteTriviallyDeadInstructions(AI.getInstruction(), true);
-
+    Inliner.inlineFunction(Callee, AI, Args);
     NumFunctionsInlined++;
   }
-
+  // The inliner splits blocks at call sites. Re-merge trivial branches to
+  // reestablish a canonical CFG.
+  mergeBasicBlocks(Caller);
   return true;
 }
 

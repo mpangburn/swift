@@ -30,14 +30,16 @@ set(SWIFTLIB_ESSENTIAL
   ASCII.swift
   Assert.swift
   AssertCommon.swift
+  AtomicInt.swift.gyb
   BidirectionalCollection.swift
+  Bitset.swift
   Bool.swift
   BridgeObjectiveC.swift
   BridgeStorage.swift
+  BridgingBuffer.swift
   Builtin.swift
   BuiltinMath.swift.gyb
   Character.swift
-  CharacterUnicodeScalars.swift
   CocoaArray.swift
   Codable.swift.gyb
   Collection.swift
@@ -45,12 +47,18 @@ set(SWIFTLIB_ESSENTIAL
   Comparable.swift
   CompilerProtocols.swift
   ContiguousArray.swift
+  ContiguouslyStored.swift
   ClosedRange.swift
   ContiguousArrayBuffer.swift
   CString.swift
   CTypes.swift
   DebuggerSupport.swift
   Dictionary.swift
+  DictionaryBridging.swift
+  DictionaryBuilder.swift
+  DictionaryCasting.swift
+  DictionaryStorage.swift
+  DictionaryVariant.swift
   DropWhile.swift
   Dump.swift
   EmptyCollection.swift
@@ -60,7 +68,7 @@ set(SWIFTLIB_ESSENTIAL
   FixedArray.swift.gyb
   FlatMap.swift
   Flatten.swift
-  FloatingPoint.swift.gyb
+  FloatingPoint.swift
   FloatingPointParsing.swift.gyb
   FloatingPointTypes.swift.gyb
   Hashable.swift
@@ -68,17 +76,18 @@ set(SWIFTLIB_ESSENTIAL
   # if we do so, the compiler crashes.
   AnyHashable.swift
   # END WORKAROUND
-  HashedCollectionsAnyHashableExtensions.swift
   Hasher.swift
   Hashing.swift
-  HeapBuffer.swift
+  HashTable.swift
   ICU.swift
   Indices.swift
   InputStream.swift
   IntegerParsing.swift
-  Integers.swift.gyb
+  Integers.swift
+  IntegerTypes.swift.gyb
   Join.swift
   KeyPath.swift
+  KeyValuePairs.swift
   LazyCollection.swift
   LazySequence.swift
   LifetimeManager.swift
@@ -89,6 +98,8 @@ set(SWIFTLIB_ESSENTIAL
   Mirrors.swift.gyb
   Misc.swift
   MutableCollection.swift
+  NativeDictionary.swift
+  NativeSet.swift
   NewtypeWrapper.swift
   NormalizedCodeUnitIterator.swift
   ObjectIdentifier.swift
@@ -106,30 +117,40 @@ set(SWIFTLIB_ESSENTIAL
   ReflectionMirror.swift
   Repeat.swift
   REPL.swift
+  Result.swift
   Reverse.swift
   Runtime.swift.gyb
   RuntimeFunctionCounters.swift
   SipHash.swift
   Sequence.swift
   SequenceAlgorithms.swift
-  SequenceWrapper.swift
   Set.swift
   SetAlgebra.swift
+  SetAnyHashableExtensions.swift
+  SetBridging.swift
+  SetBuilder.swift
+  SetCasting.swift
+  SetStorage.swift
+  SetVariant.swift
   ShadowProtocols.swift
   Shims.swift
   Slice.swift
+  SmallBuffer.swift
   SmallString.swift
   Sort.swift
   StaticString.swift
   Stride.swift
   StringHashable.swift  # ORDER DEPENDENCY: Must precede String.swift
   String.swift
+  StringBreadcrumbs.swift
   StringBridge.swift
   StringCharacterView.swift
   StringComparable.swift
   StringComparison.swift
   StringCreate.swift
   StringGuts.swift
+  StringGutsSlice.swift
+  StringGutsRangeReplaceable.swift
   StringGutsVisitor.swift
   StringObject.swift
   StringProtocol.swift
@@ -145,6 +166,7 @@ set(SWIFTLIB_ESSENTIAL
   StringUnicodeScalarView.swift
   StringUTF16View.swift
   StringUTF8View.swift
+  StringUTF8Validation.swift
   StringVariant.swift
   Substring.swift
   SwiftNativeNSArray.swift
@@ -152,12 +174,13 @@ set(SWIFTLIB_ESSENTIAL
   UIntBuffer.swift
   UnavailableStringAPIs.swift.gyb
   UnicodeEncoding.swift
+  UnicodeHelpers.swift
   UnicodeParser.swift
   UnicodeScalarProperties.swift
+  CharacterProperties.swift # ORDER DEPENDENCY: UnicodeScalarProperties.swift
   Unmanaged.swift
   UnmanagedOpaqueString.swift
   UnmanagedString.swift
-  UnsafeBitMap.swift
   UnsafeBufferPointer.swift.gyb
   UnsafeRawBufferPointer.swift.gyb
   UnsafePointer.swift
@@ -185,6 +208,8 @@ set(SWIFTLIB_SOURCES
   PlaygroundDisplay.swift
   CommandLine.swift
   SliceBuffer.swift
+  SIMDVector.swift
+  SIMDVectorTypes.swift.gyb
   Tuple.swift.gyb
   UnfoldSequence.swift
   VarArgs.swift
@@ -216,7 +241,7 @@ else()
     list(APPEND swift_core_private_link_libraries
       ICU_UC ICU_I18N)
   else()
-    list(APPEND swift_core_private_link_libraries -licui18n -licuuc -licudata)
+    list(APPEND swift_core_private_link_libraries -licui18nswift -licuucswift -licudataswift)
   endif()
 endif()
 
@@ -243,13 +268,12 @@ endif()
 
 list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-inline-generics")
 list(APPEND swift_stdlib_compile_flags "-Xllvm" "-sil-partial-specialization")
-list(APPEND swift_stdlib_compile_flags "-Xfrontend" "-enable-sil-ownership")
 if(SWIFT_STDLIB_ENABLE_STDLIBCORE_EXCLUSIVITY_CHECKING)
   list(APPEND swift_stdlib_compile_flags "-enforce-exclusivity=checked")
 endif()
 
 if(SWIFT_CHECK_ESSENTIAL_STDLIB)
-  add_swift_library(swift_stdlib_essential ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
+  add_swift_target_library(swift_stdlib_essential ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
       ${SWIFTLIB_ESSENTIAL})
   target_link_libraries(swift_stdlib_essential ${RUNTIME_DEPENDENCY})
 endif()
@@ -260,7 +284,11 @@ if(SWIFT_BUILD_STATIC_STDLIB AND "${SWIFT_HOST_VARIANT_SDK}" STREQUAL "LINUX")
    list(APPEND swift_core_private_link_libraries swiftImageInspectionShared)
 endif()
 
-add_swift_library(swiftCore
+if(SWIFT_PRIMARY_VARIANT_SDK STREQUAL Windows)
+  list(APPEND swift_core_private_link_libraries shell32)
+endif()
+
+add_swift_target_library(swiftCore
                   ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB IS_STDLIB_CORE
                     ${SWIFTLIB_SOURCES}
                   # The copy_shim_headers target dependency is required to let the

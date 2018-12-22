@@ -17,6 +17,7 @@
 
 #define DEBUG_TYPE "sil-speculative-devirtualizer"
 
+#include "swift/SIL/BasicBlockUtils.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILFunction.h"
@@ -29,7 +30,6 @@
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/PassManager.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
-#include "swift/SILOptimizer/Utils/CFG.h"
 #include "swift/SILOptimizer/Utils/Devirtualize.h"
 #include "swift/SILOptimizer/Utils/SILInliner.h"
 #include "swift/AST/ASTContext.h"
@@ -144,7 +144,7 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   SILBasicBlock *Iden = F->createBasicBlock();
   // Virt is the block containing the slow virtual call.
   SILBasicBlock *Virt = F->createBasicBlock();
-  Iden->createPHIArgument(SubType, ValueOwnershipKind::Owned);
+  Iden->createPhiArgument(SubType, ValueOwnershipKind::Owned);
 
   SILBasicBlock *Continue = Entry->split(It);
 
@@ -185,7 +185,7 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   // Create a PHInode for returning the return value from both apply
   // instructions.
   SILArgument *Arg =
-      Continue->createPHIArgument(AI.getType(), ValueOwnershipKind::Owned);
+      Continue->createPhiArgument(AI.getType(), ValueOwnershipKind::Owned);
   if (!isa<TryApplyInst>(AI)) {
     if (AI.getSubstCalleeType()->isNoReturnFunction()) {
       IdenBuilder.createUnreachable(AI.getLoc());
@@ -219,21 +219,23 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
 
   // Devirtualize the apply instruction on the identical path.
   auto NewInst =
-      devirtualizeClassMethod(IdenAI, DownCastedClassInstance, nullptr);
+    devirtualizeClassMethod(IdenAI, DownCastedClassInstance, nullptr);
   assert(NewInst && "Expected to be able to devirtualize apply!");
+  (void)NewInst;
+
   deleteDevirtualizedApply(IdenAI);
 
   // Split critical edges resulting from VirtAI.
   if (auto *TAI = dyn_cast<TryApplyInst>(VirtAI)) {
     auto *ErrorBB = TAI->getFunction()->createBasicBlock();
-    ErrorBB->createPHIArgument(TAI->getErrorBB()->getArgument(0)->getType(),
+    ErrorBB->createPhiArgument(TAI->getErrorBB()->getArgument(0)->getType(),
                                ValueOwnershipKind::Owned);
     Builder.setInsertionPoint(ErrorBB);
     Builder.createBranch(TAI->getLoc(), TAI->getErrorBB(),
                          {ErrorBB->getArgument(0)});
 
     auto *NormalBB = TAI->getFunction()->createBasicBlock();
-    NormalBB->createPHIArgument(TAI->getNormalBB()->getArgument(0)->getType(),
+    NormalBB->createPhiArgument(TAI->getNormalBB()->getArgument(0)->getType(),
                                 ValueOwnershipKind::Owned);
     Builder.setInsertionPoint(NormalBB);
     Builder.createBranch(TAI->getLoc(), TAI->getNormalBB(),
@@ -254,7 +256,7 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   return VirtAI;
 }
 
-/// \brief Returns true, if a method implementation to be called by the
+/// Returns true, if a method implementation to be called by the
 /// default case handler of a speculative devirtualization is statically
 /// known. This happens if it can be proven that generated
 /// checked_cast_br instructions cover all other possible cases.
@@ -358,7 +360,7 @@ static bool isDefaultCaseKnown(ClassHierarchyAnalysis *CHA,
   return true;
 }
 
-/// \brief Try to speculate the call target for the call \p AI. This function
+/// Try to speculate the call target for the call \p AI. This function
 /// returns true if a change was made.
 static bool tryToSpeculateTarget(FullApplySite AI, ClassHierarchyAnalysis *CHA,
                                  OptRemark::Emitter &ORE) {

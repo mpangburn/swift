@@ -39,7 +39,7 @@ static unsigned getTupleSize(CanType t) {
   return 1;
 }
 
-static unsigned getRValueSize(AbstractionPattern pattern, CanType formalType) {
+unsigned RValue::getRValueSize(AbstractionPattern pattern, CanType formalType) {
   if (pattern.isTuple()) {
     unsigned count = 0;
     auto formalTupleType = cast<TupleType>(formalType);
@@ -54,7 +54,7 @@ static unsigned getRValueSize(AbstractionPattern pattern, CanType formalType) {
 }
 
 /// Return the number of rvalue elements in the given canonical type.
-static unsigned getRValueSize(CanType type) {
+unsigned RValue::getRValueSize(CanType type) {
   if (auto tupleType = dyn_cast<TupleType>(type)) {
     unsigned count = 0;
     for (auto eltType : tupleType.getElementTypes())
@@ -117,7 +117,6 @@ public:
 
   void visitAddressTupleType(CanTupleType tupleFormalType, ManagedValue tuple) {
     bool isPlusOne = tuple.isPlusOne(SGF);
-    bool isAddressOnly = tuple.getType().isAddressOnly(SGF.SGM.M);
 
     for (unsigned i : indices(tupleFormalType->getElements())) {
       CanType eltFormalType = tupleFormalType.getElementType(i);
@@ -319,13 +318,8 @@ static void copyOrInitValuesInto(Initialization *init,
                 KIND == ImplodeKind::Copy, "Not handled by init");
   bool isInit = (KIND == ImplodeKind::Forward);
 
-  // First, unwrap one-element tuples, since we cannot lower them.
-  auto tupleType = dyn_cast<TupleType>(type);
-  if (tupleType && tupleType->getNumElements() == 1)
-    type = tupleType.getElementType(0);
-
   // If the element has non-tuple type, just serve it up to the initialization.
-  tupleType = dyn_cast<TupleType>(type);
+  auto tupleType = dyn_cast<TupleType>(type);
   if (!tupleType) {
     // We take the first value.
     ManagedValue result = values[0];
@@ -368,7 +362,7 @@ static void copyOrInitValuesInto(Initialization *init,
   ManagedValue scalar = implodeTupleValues<KIND>(values, SGF, type, loc);
 
   // This will have just used up the first values in the list, pop them off.
-  values = values.slice(getRValueSize(type));
+  values = values.slice(RValue::getRValueSize(type));
 
   init->copyOrInitValueInto(SGF, loc, scalar, isInit);
   init->finishInitialization(SGF);
@@ -401,7 +395,7 @@ static void verifyHelper(ArrayRef<ManagedValue> values,
            "All loadable values in an RValue must be an object");
 
     ValueOwnershipKind kind = v.getOwnershipKind();
-    if (kind == ValueOwnershipKind::Trivial)
+    if (kind == ValueOwnershipKind::Any)
       continue;
 
     // Merge together whether or not the RValue has cleanups.
@@ -636,9 +630,10 @@ getElementRange(CanTupleType tupleType, unsigned eltIndex) {
   assert(eltIndex < tupleType->getNumElements());
   unsigned begin = 0;
   for (unsigned i = 0; i < eltIndex; ++i) {
-    begin += getRValueSize(tupleType.getElementType(i));
+    begin += RValue::getRValueSize(tupleType.getElementType(i));
   }
-  unsigned end = begin + getRValueSize(tupleType.getElementType(eltIndex));
+  unsigned end =
+    begin + RValue::getRValueSize(tupleType.getElementType(eltIndex));
   return { begin, end };
 }
 
@@ -812,4 +807,14 @@ SILType RValue::getLoweredImplodedTupleType(SILGenFunction &SGF) const & {
       SGF.silConv.useLoweredAddresses())
     return loweredType.getAddressType();
   return loweredType.getObjectType();
+}
+
+RValue RValue::copyForDiagnostics() const {
+  assert(!isInSpecialState());
+  assert(isComplete());
+  RValue result(type);
+  for (auto value : values)
+    result.values.push_back(value);
+  result.elementsToBeAdded = 0;
+  return result;
 }

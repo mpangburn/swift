@@ -28,7 +28,7 @@ using namespace swift;
 
 static bool shouldPrintAsFavorable(const Decl *D, const PrintOptions &Options) {
   if (!Options.TransformContext ||
-      !D->getDeclContext()->isExtensionContext() ||
+      !isa<ExtensionDecl>(D->getDeclContext()) ||
       !Options.TransformContext->isPrintingSynthesizedExtension())
     return true;
   auto DC = Options.TransformContext->getDeclContext();
@@ -441,8 +441,17 @@ struct SynthesizedExtensionAnalyzer::Implementation {
       }
     };
 
+    // We want to visit the protocols of any normal conformances we see, but
+    // we have to avoid doing this to self-conformances or we can end up with
+    // a cycle.  Otherwise this is cycle-proof on valid code.
+    auto addConformance = [&](ProtocolConformance *Conf) {
+      auto RootConf = Conf->getRootConformance();
+      if (isa<NormalProtocolConformance>(RootConf))
+        Unhandled.push_back(RootConf->getProtocol());
+    };
+
     for (auto *Conf : Target->getLocalConformances()) {
-      Unhandled.push_back(Conf->getProtocol());
+      addConformance(Conf);
     }
     if (auto *CD = dyn_cast<ClassDecl>(Target)) {
       if (auto Super = CD->getSuperclassDecl())
@@ -455,7 +464,7 @@ struct SynthesizedExtensionAnalyzer::Implementation {
         handleExtension(E, true, nullptr, nullptr);
       }
       for (auto *Conf : Back->getLocalConformances()) {
-        Unhandled.push_back(Conf->getProtocol());
+        addConformance(Conf);
       }
       if (auto *CD = dyn_cast<ClassDecl>(Back)) {
         if (auto Super = CD->getSuperclass())
@@ -467,8 +476,11 @@ struct SynthesizedExtensionAnalyzer::Implementation {
     for (auto *EnablingE : Target->getExtensions()) {
       handleExtension(EnablingE, false, nullptr, nullptr);
       for (auto *Conf : EnablingE->getLocalConformances()) {
-        for (auto E : Conf->getProtocol()->getExtensions())
-          handleExtension(E, true, EnablingE, Conf->getRootNormalConformance());
+        auto NormalConf =
+          dyn_cast<NormalProtocolConformance>(Conf->getRootConformance());
+        if (!NormalConf) continue;
+        for (auto E : NormalConf->getProtocol()->getExtensions())
+          handleExtension(E, true, EnablingE, NormalConf);
       }
     }
 
@@ -536,8 +548,6 @@ hasMergeGroup(MergeGroupKind Kind) {
 void swift::
 collectDefaultImplementationForProtocolMembers(ProtocolDecl *PD,
                     llvm::SmallDenseMap<ValueDecl*, ValueDecl*> &DefaultMap) {
-  Type BaseTy = PD->getDeclaredInterfaceType();
-  DeclContext *DC = PD->getInnermostDeclContext();
   auto HandleMembers = [&](DeclRange Members) {
     for (Decl *D : Members) {
       auto *VD = dyn_cast<ValueDecl>(D);
@@ -550,11 +560,8 @@ collectDefaultImplementationForProtocolMembers(ProtocolDecl *PD,
       if (VD->getBaseName().empty())
         continue;
 
-      ResolvedMemberResult Result = resolveValueMember(*DC, BaseTy,
-                                                       VD->getFullName());
-      assert(Result);
-      for (auto *Default : Result.getMemberDecls(InterestedMemberKind::All)) {
-        if (PD == Default->getDeclContext()->getExtendedProtocolDecl()) {
+      for (auto *Default: PD->lookupDirect(VD->getFullName())) {
+        if (Default->getDeclContext()->getExtendedProtocolDecl() == PD) {
           DefaultMap.insert({Default, VD});
         }
       }

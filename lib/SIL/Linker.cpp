@@ -158,27 +158,28 @@ void SILLinkerVisitor::linkInVTable(ClassDecl *D) {
 //===----------------------------------------------------------------------===//
 
 void SILLinkerVisitor::visitApplyInst(ApplyInst *AI) {
-  if (auto sig = AI->getCallee()->getType().castTo<SILFunctionType>()
-                   ->getGenericSignature()) {
-    visitApplySubstitutions(AI->getSubstitutionMap());
-  }
+  visitApplySubstitutions(AI->getSubstitutionMap());
 }
 
 void SILLinkerVisitor::visitTryApplyInst(TryApplyInst *TAI) {
-  if (auto sig = TAI->getCallee()->getType().castTo<SILFunctionType>()
-                   ->getGenericSignature()) {
-    visitApplySubstitutions(TAI->getSubstitutionMap());
-  }
+  visitApplySubstitutions(TAI->getSubstitutionMap());
 }
 
 void SILLinkerVisitor::visitPartialApplyInst(PartialApplyInst *PAI) {
-  if (auto sig = PAI->getCallee()->getType().castTo<SILFunctionType>()
-                    ->getGenericSignature()) {
-    visitApplySubstitutions(PAI->getSubstitutionMap());
-  }
+  visitApplySubstitutions(PAI->getSubstitutionMap());
 }
 
 void SILLinkerVisitor::visitFunctionRefInst(FunctionRefInst *FRI) {
+  maybeAddFunctionToWorklist(FRI->getReferencedFunction());
+}
+
+void SILLinkerVisitor::visitDynamicFunctionRefInst(
+    DynamicFunctionRefInst *FRI) {
+  maybeAddFunctionToWorklist(FRI->getReferencedFunction());
+}
+
+void SILLinkerVisitor::visitPreviousDynamicFunctionRefInst(
+    PreviousDynamicFunctionRefInst *FRI) {
   maybeAddFunctionToWorklist(FRI->getReferencedFunction());
 }
 
@@ -199,7 +200,7 @@ static bool mustDeserializeProtocolConformance(SILModule &M,
 
 void SILLinkerVisitor::visitProtocolConformance(
     ProtocolConformanceRef ref, const Optional<SILDeclRef> &Member) {
-  // If an abstract protocol conformance was passed in, just return false.
+  // If an abstract protocol conformance was passed in, do nothing.
   if (ref.isAbstract())
     return;
   
@@ -210,31 +211,16 @@ void SILLinkerVisitor::visitProtocolConformance(
   
   if (!VisitedConformances.insert(C).second)
     return;
-  
-  SILWitnessTable *WT = Mod.lookUpWitnessTable(C, true);
 
-  // If we don't find any witness table for the conformance, bail and return
-  // false.
-  if (!WT) {
-    Mod.createWitnessTableDeclaration(
-        C, getLinkageForProtocolConformance(
-               C->getRootNormalConformance(), NotForDefinition));
-
-    // Adding the declaration may allow us to now deserialize the body.
-    // Force the body if we must deserialize this witness table.
-    if (mustDeserialize) {
-      WT = Mod.lookUpWitnessTable(C, true);
-      assert(WT && WT->isDefinition()
-             && "unable to deserialize witness table when we must?!");
-    } else {
-      return;
-    }
-  }
+  auto *WT = Mod.lookUpWitnessTable(C, mustDeserialize);
 
   // If the looked up witness table is a declaration, there is nothing we can
-  // do here. Just bail and return false.
-  if (WT->isDeclaration())
+  // do here.
+  if (WT == nullptr || WT->isDeclaration()) {
+    assert(!mustDeserialize &&
+           "unable to deserialize witness table when we must?!");
     return;
+  }
 
   auto maybeVisitRelatedConformance = [&](ProtocolConformanceRef c) {
     // Formally all conformances referenced by a used conformance are used.

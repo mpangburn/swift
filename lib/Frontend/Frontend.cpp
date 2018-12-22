@@ -23,9 +23,12 @@
 #include "swift/Basic/FileTypes.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Statistic.h"
+#include "swift/DWARFImporter/DWARFImporter.h"
 #include "swift/Parse/DelayedParsingCallbacks.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SILOptimizer/PassManager/Passes.h"
+#include "swift/Serialization/SerializationOptions.h"
 #include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Strings.h"
 #include "swift/Subsystems.h"
@@ -35,6 +38,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 
 using namespace swift;
 
@@ -109,6 +113,42 @@ std::string CompilerInvocation::getTBDPathForWholeModule() const {
       .SupplementaryOutputs.TBDPath;
 }
 
+std::string
+CompilerInvocation::getParseableInterfaceOutputPathForWholeModule() const {
+  assert(getFrontendOptions().InputsAndOutputs.isWholeModule() &&
+         "ParseableInterfaceOutputPath only makes sense when the whole module "
+         "can be seen");
+  return getPrimarySpecificPathsForAtMostOnePrimary()
+      .SupplementaryOutputs.ParseableInterfaceOutputPath;
+}
+
+SerializationOptions
+CompilerInvocation::computeSerializationOptions(const SupplementaryOutputPaths &outs,
+                                                bool moduleIsPublic) {
+  const FrontendOptions &opts = getFrontendOptions();
+
+  SerializationOptions serializationOpts;
+  serializationOpts.OutputPath = outs.ModuleOutputPath.c_str();
+  serializationOpts.DocOutputPath = outs.ModuleDocOutputPath.c_str();
+  serializationOpts.GroupInfoPath = opts.GroupInfoPath.c_str();
+  if (opts.SerializeBridgingHeader && !outs.ModuleOutputPath.empty())
+    serializationOpts.ImportedHeader = opts.ImplicitObjCHeaderPath;
+  serializationOpts.ModuleLinkName = opts.ModuleLinkName;
+  serializationOpts.ExtraClangOptions = getClangImporterOptions().ExtraArgs;
+  serializationOpts.EnableNestedTypeLookupTable =
+      opts.EnableSerializationNestedTypeLookupTable;
+  if (!getIRGenOptions().ForceLoadSymbolName.empty())
+    serializationOpts.AutolinkForceLoad = true;
+
+  // Options contain information about the developer's computer,
+  // so only serialize them if the module isn't going to be shipped to
+  // the public.
+  serializationOpts.SerializeOptionsForDebugging =
+      opts.SerializeOptionsForDebugging.getValueOr(!moduleIsPublic);
+
+  return serializationOpts;
+}
+
 void CompilerInstance::createSILModule() {
   assert(MainModule && "main module not created yet");
   // Assume WMO if a -primary-file option was not provided.
@@ -128,6 +168,7 @@ void CompilerInstance::recordPrimaryInputBuffer(unsigned BufID) {
 void CompilerInstance::recordPrimarySourceFile(SourceFile *SF) {
   assert(MainModule && "main module not created yet");
   PrimarySourceFiles.push_back(SF);
+  SF->enableInterfaceHash();
   SF->createReferencedNameTracker();
   if (SF->getBufferID().hasValue())
     recordPrimaryInputBuffer(SF->getBufferID().getValue());
@@ -250,25 +291,66 @@ bool CompilerInstance::setUpModuleLoaders() {
                                                   enableResilience,
                                                   getDependencyTracker()));
   }
-  {
-    auto SML = SerializedModuleLoader::create(*Context, getDependencyTracker());
-    this->SML = SML.get();
-    Context->addModuleLoader(std::move(SML));
+  auto MLM = ModuleLoadingMode::OnlySerialized;
+  if (Invocation.getFrontendOptions().EnableParseableModuleInterface) {
+    MLM = ModuleLoadingMode::PreferSerialized;
   }
-  {
-    // Wire up the Clang importer. If the user has specified an SDK, use it.
-    // Otherwise, we just keep it around as our interface to Clang's ABI
-    // knowledge.
-    auto clangImporter =
-        ClangImporter::create(*Context, Invocation.getClangImporterOptions(),
-                              Invocation.getPCHHash(), getDependencyTracker());
-    if (!clangImporter) {
+  if (auto forceModuleLoadingMode =
+      llvm::sys::Process::GetEnv("SWIFT_FORCE_MODULE_LOADING")) {
+    if (*forceModuleLoadingMode == "prefer-parseable")
+      MLM = ModuleLoadingMode::PreferParseable;
+    else if (*forceModuleLoadingMode == "prefer-serialized")
+      MLM = ModuleLoadingMode::PreferSerialized;
+    else if (*forceModuleLoadingMode == "only-parseable")
+      MLM = ModuleLoadingMode::OnlyParseable;
+    else if (*forceModuleLoadingMode == "only-serialized")
+      MLM = ModuleLoadingMode::OnlySerialized;
+    else {
+      Diagnostics.diagnose(SourceLoc(),
+                           diag::unknown_forced_module_loading_mode,
+                           *forceModuleLoadingMode);
+      return true;
+    }
+  }
+
+  std::unique_ptr<SerializedModuleLoader> SML =
+    SerializedModuleLoader::create(*Context, getDependencyTracker(), MLM);
+  this->SML = SML.get();
+
+  // Wire up the Clang importer. If the user has specified an SDK, use it.
+  // Otherwise, we just keep it around as our interface to Clang's ABI
+  // knowledge.
+  std::unique_ptr<ClangImporter> clangImporter =
+    ClangImporter::create(*Context, Invocation.getClangImporterOptions(),
+                          Invocation.getPCHHash(), getDependencyTracker());
+  if (!clangImporter) {
+    Diagnostics.diagnose(SourceLoc(), diag::error_clang_importer_create_fail);
+    return true;
+  }
+
+  if (MLM != ModuleLoadingMode::OnlySerialized) {
+    auto const &Clang = clangImporter->getClangInstance();
+    std::string ModuleCachePath = getModuleCachePathFromClang(Clang);
+    auto PIML = ParseableInterfaceModuleLoader::create(*Context,
+                                                       ModuleCachePath,
+                                                       getDependencyTracker(),
+                                                       MLM);
+    Context->addModuleLoader(std::move(PIML));
+  }
+  Context->addModuleLoader(std::move(SML));
+  Context->addModuleLoader(std::move(clangImporter), /*isClang*/ true);
+
+  if (Invocation.getLangOptions().EnableDWARFImporter) {
+    auto dwarfImporter =
+        DWARFImporter::create(*Context, Invocation.getClangImporterOptions(),
+                              getDependencyTracker());
+    if (!dwarfImporter) {
       Diagnostics.diagnose(SourceLoc(), diag::error_clang_importer_create_fail);
       return true;
     }
-
-    Context->addModuleLoader(std::move(clangImporter), /*isClang*/ true);
+    Context->addModuleLoader(std::move(dwarfImporter));
   }
+
   return false;
 }
 
@@ -298,6 +380,7 @@ static bool shouldTreatSingleInputAsMain(InputFileKind inputKind) {
   case InputFileKind::None:
     return false;
   }
+  llvm_unreachable("unhandled input kind");
 }
 
 bool CompilerInstance::setUpInputs() {
@@ -429,12 +512,20 @@ CompilerInstance::openModuleDoc(const InputFile &input) {
   return None;
 }
 
+std::unique_ptr<SILModule> CompilerInstance::takeSILModule() {
+  return std::move(TheSILModule);
+}
+
 ModuleDecl *CompilerInstance::getMainModule() {
   if (!MainModule) {
     Identifier ID = Context->getIdentifier(Invocation.getModuleName());
     MainModule = ModuleDecl::create(ID, *Context);
     if (Invocation.getFrontendOptions().EnableTesting)
       MainModule->setTestingEnabled();
+    if (Invocation.getFrontendOptions().EnablePrivateImports)
+      MainModule->setPrivateImportsEnabled();
+    if (Invocation.getFrontendOptions().EnableImplicitDynamic)
+      MainModule->setImplicitDynamicEnabled();
 
     if (Invocation.getFrontendOptions().EnableResilience)
       MainModule->setResilienceStrategy(ResilienceStrategy::Resilient);
@@ -444,22 +535,24 @@ ModuleDecl *CompilerInstance::getMainModule() {
 
 static void addAdditionalInitialImportsTo(
     SourceFile *SF, const CompilerInstance::ImplicitImports &implicitImports) {
-  using ImportPair =
-      std::pair<ModuleDecl::ImportedModule, SourceFile::ImportOptions>;
-  SmallVector<ImportPair, 4> additionalImports;
+  SmallVector<SourceFile::ImportedModuleDesc, 4> additionalImports;
 
   if (implicitImports.objCModuleUnderlyingMixedFramework)
-    additionalImports.push_back(
-        {{/*accessPath=*/{},
-          implicitImports.objCModuleUnderlyingMixedFramework},
-         SourceFile::ImportFlags::Exported});
+    additionalImports.push_back(SourceFile::ImportedModuleDesc(
+        ModuleDecl::ImportedModule(
+            /*accessPath=*/{},
+            implicitImports.objCModuleUnderlyingMixedFramework),
+        SourceFile::ImportFlags::Exported));
   if (implicitImports.headerModule)
-    additionalImports.push_back(
-        {{/*accessPath=*/{}, implicitImports.headerModule},
-         SourceFile::ImportFlags::Exported});
+    additionalImports.push_back(SourceFile::ImportedModuleDesc(
+        ModuleDecl::ImportedModule(/*accessPath=*/{},
+                                   implicitImports.headerModule),
+        SourceFile::ImportFlags::Exported));
   if (!implicitImports.modules.empty()) {
     for (auto &importModule : implicitImports.modules) {
-      additionalImports.push_back({{/*accessPath=*/{}, importModule}, {}});
+      additionalImports.push_back(SourceFile::ImportedModuleDesc(
+          ModuleDecl::ImportedModule(/*accessPath=*/{}, importModule),
+          SourceFile::ImportOptions()));
     }
   }
 
@@ -511,7 +604,9 @@ void CompilerInstance::performSemaUpTo(SourceFile::ASTStage_t LimitStage) {
   }
 
   FrontendStatsTracer tracer(Context->Stats, "perform-sema");
-  Context->LoadedModules[MainModule->getName()] = getMainModule();
+
+  ModuleDecl *mainModule = getMainModule();
+  Context->LoadedModules[mainModule->getName()] = mainModule;
 
   if (Invocation.getInputKind() == InputFileKind::SIL) {
     assert(!InputSourceCodeBufferIDs.empty());
@@ -666,7 +761,7 @@ void CompilerInstance::parseAndCheckTypesUpTo(
   std::unique_ptr<DelayedParsingCallbacks> SecondaryDelayedCB{
       computeDelayedParsingCallback(false)};
 
-  PersistentParserState PersistentState;
+  PersistentParserState PersistentState(getASTContext());
 
   bool hadLoadError = parsePartialModulesAndLibraryFiles(
       implicitImports, PersistentState,
@@ -832,7 +927,7 @@ void CompilerInstance::parseAndTypeCheckMainFileUpTo(
                         TheSILModule ? &SILContext : nullptr, &PersistentState,
                         DelayedParseCB);
 
-    if (mainIsPrimary) {
+    if (mainIsPrimary && (Done || CurTUElem < MainFile.Decls.size())) {
       switch (LimitStage) {
       case SourceFile::Parsing:
       case SourceFile::Parsed:
@@ -924,7 +1019,8 @@ SourceFile *CompilerInstance::createSourceFileForMainModule(
   return inputFile;
 }
 
-void CompilerInstance::performParseOnly(bool EvaluateConditionals) {
+void CompilerInstance::performParseOnly(bool EvaluateConditionals,
+                                        bool ParseDelayedBodyOnEnd) {
   const InputFileKind Kind = Invocation.getInputKind();
   ModuleDecl *const MainModule = getMainModule();
   Context->LoadedModules[MainModule->getName()] = MainModule;
@@ -945,7 +1041,11 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals) {
                                   MainBufferID);
   }
 
-  PersistentParserState PersistentState;
+  PersistentParserState PersistentState(getASTContext());
+  SWIFT_DEFER {
+    if (ParseDelayedBodyOnEnd)
+      PersistentState.parseAllDelayedDeclLists();
+  };
   PersistentState.PerformConditionEvaluation = EvaluateConditionals;
   // Parse all the library files.
   for (auto BufferID : InputSourceCodeBufferIDs) {
@@ -956,13 +1056,7 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals) {
         SourceFileKind::Library, SourceFile::ImplicitModuleImportKind::None,
         BufferID);
 
-    bool Done;
-    do {
-      // Parser may stop at some erroneous constructions like #else, #endif
-      // or '}' in some cases, continue parsing until we are done
-      parseIntoSourceFile(*NextInput, BufferID, &Done, nullptr,
-                          &PersistentState, nullptr);
-    } while (!Done);
+    parseIntoSourceFileFull(*NextInput, BufferID, &PersistentState);
   }
 
   // Now parse the main file.
@@ -971,11 +1065,8 @@ void CompilerInstance::performParseOnly(bool EvaluateConditionals) {
         MainModule->getMainSourceFile(Invocation.getSourceFileKind());
     MainFile.SyntaxParsingCache = Invocation.getMainFileSyntaxParsingCache();
 
-    bool Done;
-    do {
-      parseIntoSourceFile(MainFile, MainFile.getBufferID().getValue(), &Done,
-                          nullptr, &PersistentState, nullptr);
-    } while (!Done);
+    parseIntoSourceFileFull(MainFile, MainFile.getBufferID().getValue(),
+                            &PersistentState);
   }
 
   assert(Context->LoadedModules.size() == 1 &&
@@ -991,6 +1082,85 @@ void CompilerInstance::freeASTContext() {
 }
 
 void CompilerInstance::freeSILModule() { TheSILModule.reset(); }
+
+/// Perform "stable" optimizations that are invariant across compiler versions.
+static bool performMandatorySILPasses(CompilerInvocation &Invocation,
+                                      SILModule *SM) {
+  if (Invocation.getFrontendOptions().RequestedAction ==
+      FrontendOptions::ActionType::MergeModules) {
+    // Don't run diagnostic passes at all.
+  } else if (!Invocation.getDiagnosticOptions().SkipDiagnosticPasses) {
+    if (runSILDiagnosticPasses(*SM))
+      return true;
+  } else {
+    // Even if we are not supposed to run the diagnostic passes, we still need
+    // to run the ownership evaluator.
+    if (runSILOwnershipEliminatorPass(*SM))
+      return true;
+  }
+
+  if (Invocation.getSILOptions().MergePartialModules)
+    SM->linkAllFromCurrentModule();
+  return false;
+}
+
+/// Perform SIL optimization passes if optimizations haven't been disabled.
+/// These may change across compiler versions.
+static void performSILOptimizations(CompilerInvocation &Invocation,
+                                    SILModule *SM) {
+  SharedTimer timer("SIL optimization");
+  if (Invocation.getFrontendOptions().RequestedAction ==
+      FrontendOptions::ActionType::MergeModules ||
+      !Invocation.getSILOptions().shouldOptimize()) {
+    runSILPassesForOnone(*SM);
+    return;
+  }
+  runSILOptPreparePasses(*SM);
+
+  StringRef CustomPipelinePath =
+  Invocation.getSILOptions().ExternalPassPipelineFilename;
+  if (!CustomPipelinePath.empty()) {
+    runSILOptimizationPassesWithFileSpecification(*SM, CustomPipelinePath);
+  } else {
+    runSILOptimizationPasses(*SM);
+  }
+}
+
+static void countStatsPostSILOpt(UnifiedStatsReporter &Stats,
+                                 const SILModule& Module) {
+  auto &C = Stats.getFrontendCounters();
+  // FIXME: calculate these in constant time, via the dense maps.
+  C.NumSILOptFunctions += Module.getFunctionList().size();
+  C.NumSILOptVtables += Module.getVTableList().size();
+  C.NumSILOptWitnessTables += Module.getWitnessTableList().size();
+  C.NumSILOptDefaultWitnessTables += Module.getDefaultWitnessTableList().size();
+  C.NumSILOptGlobalVariables += Module.getSILGlobalList().size();
+}
+
+bool CompilerInstance::performSILProcessing(SILModule *silModule,
+                                            UnifiedStatsReporter *stats) {
+  if (performMandatorySILPasses(Invocation, silModule))
+    return true;
+
+  {
+    SharedTimer timer("SIL verification, pre-optimization");
+    silModule->verify();
+  }
+
+  performSILOptimizations(Invocation, silModule);
+
+  if (stats)
+    countStatsPostSILOpt(*stats, *silModule);
+
+  {
+    SharedTimer timer("SIL verification, post-optimization");
+    silModule->verify();
+  }
+
+  performSILInstCountIfNeeded(silModule);
+  return false;
+}
+
 
 const PrimarySpecificPaths &
 CompilerInstance::getPrimarySpecificPathsForWholeModuleOptimizationMode()

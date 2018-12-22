@@ -79,6 +79,7 @@ private:
     case BridgedMethod:
       return 'm';
     }
+    llvm_unreachable("unhandled kind");
   }
 };
 } // end anonymous namespace.
@@ -144,7 +145,9 @@ static SILDeclRef getBridgeToObjectiveC(CanType NativeType,
   FuncDecl *Requirement = nullptr;
   // bridgeToObjectiveC
   DeclName Name(Ctx, Ctx.Id_bridgeToObjectiveC, llvm::ArrayRef<Identifier>());
-  for (auto Member : Proto->lookupDirect(Name, true)) {
+  auto flags = OptionSet<NominalTypeDecl::LookupDirectFlags>();
+  flags |= NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
+  for (auto Member : Proto->lookupDirect(Name, flags)) {
     if (auto Func = dyn_cast<FuncDecl>(Member)) {
       Requirement = Func;
       break;
@@ -174,7 +177,9 @@ SILDeclRef getBridgeFromObjectiveC(CanType NativeType,
   // _unconditionallyBridgeFromObjectiveC
   DeclName Name(Ctx, Ctx.getIdentifier("_unconditionallyBridgeFromObjectiveC"),
                 llvm::makeArrayRef(Identifier()));
-  for (auto Member : Proto->lookupDirect(Name, true)) {
+  auto flags = OptionSet<NominalTypeDecl::LookupDirectFlags>();
+  flags |= NominalTypeDecl::LookupDirectFlags::IgnoreNewExtensions;
+  for (auto Member : Proto->lookupDirect(Name, flags)) {
     if (auto Func = dyn_cast<FuncDecl>(Member)) {
       Requirement = Func;
       break;
@@ -312,11 +317,12 @@ BridgedProperty::outline(SILModule &M) {
   // Get the function type.
   auto FunctionType = getOutlinedFunctionType(M);
 
-  std::string name = getOutlinedFunctionName();
+  std::string nameTmp = getOutlinedFunctionName();
+  auto name = M.allocateCopy(nameTmp);
 
   auto *Fun = FuncBuilder.getOrCreateFunction(
       ObjCMethod->getLoc(), name, SILLinkage::Shared, FunctionType, IsNotBare,
-      IsNotTransparent, IsSerializable);
+      IsNotTransparent, IsSerializable, IsNotDynamic);
   bool NeedsDefinition = Fun->empty();
 
   if (Release) {
@@ -372,8 +378,8 @@ BridgedProperty::outline(SILModule &M) {
     return std::make_pair(nullptr, std::prev(StartBB->end()));
   }
 
-  if (!OutlinedEntryBB->getParent()->hasQualifiedOwnership())
-    Fun->setUnqualifiedOwnership();
+  if (!OutlinedEntryBB->getParent()->hasOwnership())
+    Fun->setOwnershipEliminated();
 
   Fun->setInlineStrategy(NoInline);
 
@@ -922,11 +928,12 @@ std::pair<SILFunction *, SILBasicBlock::iterator>
 ObjCMethodCall::outline(SILModule &M) {
 
   auto FunctionType = getOutlinedFunctionType(M);
-  std::string name = getOutlinedFunctionName();
+  std::string nameTmp = getOutlinedFunctionName();
+  auto name = M.allocateCopy(nameTmp);
 
   auto *Fun = FuncBuilder.getOrCreateFunction(
       ObjCMethod->getLoc(), name, SILLinkage::Shared, FunctionType, IsNotBare,
-      IsNotTransparent, IsSerializable);
+      IsNotTransparent, IsSerializable, IsNotDynamic);
   bool NeedsDefinition = Fun->empty();
 
   // Call the outlined function.
@@ -970,8 +977,8 @@ ObjCMethodCall::outline(SILModule &M) {
     return std::make_pair(Fun, I);
   }
 
-  if (!ObjCMethod->getFunction()->hasQualifiedOwnership())
-    Fun->setUnqualifiedOwnership();
+  if (!ObjCMethod->getFunction()->hasOwnership())
+    Fun->setOwnershipEliminated();
 
   Fun->setInlineStrategy(NoInline);
 

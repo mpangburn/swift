@@ -203,18 +203,6 @@ SILValue swift::stripAddressProjections(SILValue V) {
   }
 }
 
-SILValue swift::stripUnaryAddressProjections(SILValue V) {
-  while (true) {
-    V = stripSinglePredecessorArgs(V);
-    if (!Projection::isAddressProjection(V))
-      return V;
-    auto *Inst = cast<SingleValueInstruction>(V);
-    if (Inst->getNumOperands() > 1)
-      return V;
-    V = Inst->getOperand(0);
-  }
-}
-
 SILValue swift::stripValueProjections(SILValue V) {
   while (true) {
     V = stripSinglePredecessorArgs(V);
@@ -306,6 +294,10 @@ bool swift::onlyAffectsRefCount(SILInstruction *user) {
 #include "swift/AST/ReferenceStorage.def"
     return true;
   }
+}
+
+bool swift::mayCheckRefCount(SILInstruction *User) {
+  return isa<IsUniqueInst>(User) || isa<IsEscapingClosureInst>(User);
 }
 
 bool swift::isSanitizerInstrumentation(SILInstruction *Instruction) {
@@ -463,9 +455,9 @@ void swift::findClosuresForFunctionValue(
     // Look through Phis.
     //
     // This should be done before calling findClosureStoredIntoBlock.
-    if (auto *arg = dyn_cast<SILPHIArgument>(V)) {
+    if (auto *arg = dyn_cast<SILPhiArgument>(V)) {
       SmallVector<std::pair<SILBasicBlock *, SILValue>, 2> blockArgs;
-      arg->getIncomingValues(blockArgs);
+      arg->getIncomingPhiValues(blockArgs);
       for (auto &blockAndArg : blockArgs)
         worklistInsert(blockAndArg.second);
 
@@ -547,7 +539,7 @@ bool FunctionOwnershipEvaluator::evaluate(SILInstruction *I) {
   case OwnershipQualifiedKind::Unqualified: {
     // If we already know that the function has unqualified ownership, just
     // return early.
-    if (!F.get()->hasQualifiedOwnership())
+    if (!F.get()->hasOwnership())
       return true;
 
     // Ok, so we know at this point that we have qualified ownership. If we have
@@ -559,7 +551,7 @@ bool FunctionOwnershipEvaluator::evaluate(SILInstruction *I) {
     // Otherwise, set the function to have unqualified ownership. This will
     // ensure that no more Qualified instructions can be added to the given
     // function.
-    F.get()->setUnqualifiedOwnership();
+    F.get()->setOwnershipEliminated();
     return true;
   }
   case OwnershipQualifiedKind::Qualified: {
@@ -567,7 +559,7 @@ bool FunctionOwnershipEvaluator::evaluate(SILInstruction *I) {
     // have unqualified ownership, then we know that we have already seen an
     // unqualified ownership instruction. This means the function has both
     // qualified and unqualified instructions. =><=.
-    if (!F.get()->hasQualifiedOwnership())
+    if (!F.get()->hasOwnership())
       return false;
 
     // Ok, at this point we know that we are still qualified. Since functions

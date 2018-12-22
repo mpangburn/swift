@@ -280,7 +280,7 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
         Layout.StartOfImmediateMembers = getNextOffset();
 
         if (Layout.HasResilientSuperclass ||
-            IGM.isResilient(forClass, ResilienceExpansion::Maximal)) {
+            IGM.hasResilientMetadata(forClass, ResilienceExpansion::Maximal)) {
           assert(!DynamicOffsetBase);
           DynamicOffsetBase = NextOffset;
         }
@@ -397,16 +397,6 @@ ClassMetadataLayout::getMethodInfo(IRGenFunction &IGF, SILDeclRef method) const{
   auto &stored = getStoredMethodInfo(method);
   auto offset = emitOffset(IGF, stored.TheOffset);
   return MethodInfo(offset);
-}
-
-MetadataLayout::StoredOffset
-ClassMetadataLayout::getMethodOffsetInfo(SILDeclRef method) const {
-  return getStoredMethodInfo(method).TheOffset;
-}
-
-Offset
-ClassMetadataLayout::getVTableOffset(IRGenFunction &IGF) const {
-  return emitOffset(IGF, VTableOffset);
 }
 
 Offset ClassMetadataLayout::getFieldOffset(IRGenFunction &IGF,

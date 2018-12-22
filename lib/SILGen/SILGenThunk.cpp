@@ -48,12 +48,13 @@ SILFunction *SILGenModule::getDynamicThunk(SILDeclRef constant,
   assert(constant.kind != SILDeclRef::Kind::Allocator &&
          "allocating entry point for constructor is never dynamic");
   // Mangle the constant with a TD suffix.
-  auto name = constant.mangle(SILDeclRef::ManglingKind::DynamicThunk);
+  auto nameTmp = constant.mangle(SILDeclRef::ManglingKind::DynamicThunk);
+  auto name = M.allocateCopy(nameTmp);
 
   SILGenFunctionBuilder builder(*this);
   auto F = builder.getOrCreateFunction(
       constant.getDecl(), name, SILLinkage::Shared, constantTy, IsBare,
-      IsTransparent, IsSerializable, ProfileCounter(), IsThunk);
+      IsTransparent, IsSerializable, IsNotDynamic, ProfileCounter(), IsThunk);
 
   if (F->empty()) {
     // Emit the thunk if we haven't yet.
@@ -75,14 +76,14 @@ SILGenFunction::emitDynamicMethodRef(SILLocation loc, SILDeclRef constant,
   if (constant.isForeignToNativeThunk()) {
     if (!SGM.hasFunction(constant))
       SGM.emitForeignToNativeThunk(constant);
-    return ManagedValue::forUnmanaged(
-        B.createFunctionRef(loc, SGM.getFunction(constant, NotForDefinition)));
+    return ManagedValue::forUnmanaged(B.createFunctionRefFor(
+        loc, SGM.getFunction(constant, NotForDefinition)));
   }
 
   // Otherwise, we need a dynamic dispatch thunk.
   SILFunction *F = SGM.getDynamicThunk(constant, constantTy);
 
-  return ManagedValue::forUnmanaged(B.createFunctionRef(loc, F));
+  return ManagedValue::forUnmanaged(B.createFunctionRefFor(loc, F));
 }
 
 static ManagedValue getNextUncurryLevelRef(SILGenFunction &SGF, SILLocation loc,
@@ -109,8 +110,9 @@ static ManagedValue getNextUncurryLevelRef(SILGenFunction &SGF, SILLocation loc,
   if (auto *func = dyn_cast<AbstractFunctionDecl>(vd)) {
     if (getMethodDispatch(func) == MethodDispatch::Class) {
       // Use the dynamic thunk if dynamic.
-      if (vd->isDynamic())
+      if (vd->isObjCDynamic()) {
         return SGF.emitDynamicMethodRef(loc, next, constantInfo.SILFnType);
+      }
 
       auto methodTy = SGF.SGM.Types.getConstantOverrideType(next);
       SILValue result =
@@ -236,9 +238,10 @@ void SILGenModule::emitNativeToForeignThunk(SILDeclRef thunk) {
   postEmitFunction(thunk, f);
 }
 
-SILValue SILGenFunction::emitGlobalFunctionRef(SILLocation loc,
-                                               SILDeclRef constant,
-                                               SILConstantInfo constantInfo) {
+SILValue
+SILGenFunction::emitGlobalFunctionRef(SILLocation loc, SILDeclRef constant,
+                                      SILConstantInfo constantInfo,
+                                      bool callPreviousDynamicReplaceableImpl) {
   assert(constantInfo == getConstantInfo(constant));
 
   // Builtins must be fully applied at the point of reference.
@@ -264,7 +267,10 @@ SILValue SILGenFunction::emitGlobalFunctionRef(SILLocation loc,
 
   auto f = SGM.getFunction(constant, NotForDefinition);
   assert(f->getLoweredFunctionType() == constantInfo.SILFnType);
-  return B.createFunctionRef(loc, f);
+  if (callPreviousDynamicReplaceableImpl)
+    return B.createPreviousDynamicFunctionRef(loc, f);
+  else
+    return B.createFunctionRefFor(loc, f);
 }
 
 SILFunction *SILGenModule::
@@ -293,5 +299,5 @@ getOrCreateReabstractionThunk(CanSILFunctionType thunkType,
   SILGenFunctionBuilder builder(*this);
   return builder.getOrCreateSharedFunction(
       loc, name, thunkDeclType, IsBare, IsTransparent, IsSerializable,
-      ProfileCounter(), IsReabstractionThunk);
+      ProfileCounter(), IsReabstractionThunk, IsNotDynamic);
 }

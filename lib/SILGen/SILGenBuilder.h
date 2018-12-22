@@ -63,6 +63,14 @@ public:
                 SILBasicBlock::iterator insertInst)
       : SILGenBuilder(SGF, &*insertBB, insertInst) {}
 
+  // Create a new builder, inheriting the given builder's context and debug
+  // scope.
+  SILGenBuilder(SILGenBuilder &builder, SILBasicBlock *insertBB)
+    : SILBuilder(insertBB, builder.getCurrentDebugScope(),
+                 builder.getBuilderContext()),
+      SGF(builder.SGF)
+  {}
+
   SILGenModule &getSILGenModule() const;
   SILGenFunction &getSILGenFunction() const { return SGF; }
 
@@ -191,8 +199,8 @@ public:
                                              ManagedValue originalValue);
 #include "swift/AST/ReferenceStorage.def"
 
-  ManagedValue createOwnedPHIArgument(SILType type);
-  ManagedValue createGuaranteedPHIArgument(SILType type);
+  ManagedValue createOwnedPhiArgument(SILType type);
+  ManagedValue createGuaranteedPhiArgument(SILType type);
 
   using SILBuilder::createMarkUninitialized;
   ManagedValue createMarkUninitialized(ValueDecl *decl, ManagedValue operand,
@@ -411,11 +419,16 @@ public:
   using SILBuilder::createReturn;
   ReturnInst *createReturn(SILLocation Loc, ManagedValue ReturnValue);
 
+  using SILBuilder::emitDestructureValueOperation;
   /// Perform either a tuple or struct destructure and then pass its components
   /// as managed value one by one with an index to the closure.
   void emitDestructureValueOperation(
       SILLocation loc, ManagedValue value,
       function_ref<void(unsigned, ManagedValue)> func);
+
+  using SILBuilder::createProjectBox;
+  ManagedValue createProjectBox(SILLocation loc, ManagedValue mv,
+                                unsigned index);
 };
 
 } // namespace Lowering

@@ -30,6 +30,7 @@ import ArraySubscript
 import BinaryFloatingPointConversionFromBinaryInteger
 import BinaryFloatingPointProperties
 import BitCount
+import Breadcrumbs
 import ByteSwap
 import COWTree
 import COWArrayGuaranteedParameterOverhead
@@ -43,7 +44,9 @@ import CharacterLiteralsSmall
 import CharacterProperties
 import Chars
 import ClassArrayGetter
+import Codable
 import Combos
+import CountAlgo
 import DataBenchmarks
 import DeadArray
 import DictOfArraysToArrayOfDicts
@@ -59,6 +62,7 @@ import DictionaryCopy
 import DictionaryGroup
 import DictionaryKeysContains
 import DictionaryLiteral
+import DictionaryOfAnyHashableStrings
 import DictionaryRemove
 import DictionarySubscriptDefault
 import DictionarySwap
@@ -70,11 +74,13 @@ import ErrorHandling
 import Exclusivity
 import ExistentialPerformance
 import Fibonacci
+import FlattenList
 import FloatingPointPrinting
 import Hanoi
 import Hash
 import HashQuadratic
 import Histogram
+import InsertCharacter
 import Integrate
 import IterateData
 import Join
@@ -92,10 +98,12 @@ import NSError
 import NSStringConversion
 import NopDeinit
 import ObjectAllocation
+#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
 import ObjectiveCBridging
 import ObjectiveCBridgingStubs
 #if !(SWIFT_PACKAGE || Xcode)
 import ObjectiveCNoBridgingStubs
+#endif
 #endif
 import ObserverClosure
 import ObserverForwarderStruct
@@ -189,6 +197,7 @@ registerBenchmark(BinaryFloatingPointPropertiesBinade)
 registerBenchmark(BinaryFloatingPointPropertiesNextUp)
 registerBenchmark(BinaryFloatingPointPropertiesUlp)
 registerBenchmark(BitCount)
+registerBenchmark(Breadcrumbs)
 registerBenchmark(ByteSwap)
 registerBenchmark(COWTree)
 registerBenchmark(COWArrayGuaranteedParameterOverhead)
@@ -207,6 +216,7 @@ registerBenchmark(CharacterPropertiesStashedMemo)
 registerBenchmark(CharacterPropertiesPrecomputed)
 registerBenchmark(Chars)
 registerBenchmark(Combos)
+registerBenchmark(CountAlgo)
 registerBenchmark(ClassArrayGetter)
 registerBenchmark(DataBenchmarks)
 registerBenchmark(DeadArray)
@@ -223,6 +233,7 @@ registerBenchmark(DictionaryCopy)
 registerBenchmark(DictionaryGroup)
 registerBenchmark(DictionaryKeysContains)
 registerBenchmark(DictionaryLiteral)
+registerBenchmark(DictionaryOfAnyHashableStrings)
 registerBenchmark(DictionaryRemove)
 registerBenchmark(DictionarySubscriptDefault)
 registerBenchmark(DictionarySwap)
@@ -234,13 +245,17 @@ registerBenchmark(ErrorHandling)
 registerBenchmark(Exclusivity)
 registerBenchmark(ExistentialPerformance)
 registerBenchmark(Fibonacci)
+registerBenchmark(FlattenListLoop)
+registerBenchmark(FlattenListFlatMap)
 registerBenchmark(FloatingPointPrinting)
 registerBenchmark(Hanoi)
 registerBenchmark(HashTest)
 registerBenchmark(HashQuadratic)
 registerBenchmark(Histogram)
+registerBenchmark(InsertCharacter)
 registerBenchmark(IntegrateTest)
 registerBenchmark(IterateData)
+registerBenchmark(Codable)
 registerBenchmark(Join)
 registerBenchmark(LazyFilter)
 registerBenchmark(LinkedList)
@@ -255,11 +270,14 @@ registerBenchmark(NSErrorTest)
 registerBenchmark(NSStringConversion)
 registerBenchmark(NibbleSort)
 registerBenchmark(NopDeinit)
+registerBenchmark(NormalizedIterator)
 registerBenchmark(ObjectAllocation)
+#if os(macOS) || os(iOS) || os(watchOS) || os(tvOS)
 registerBenchmark(ObjectiveCBridging)
 registerBenchmark(ObjectiveCBridgingStubs)
 #if !(SWIFT_PACKAGE || Xcode)
 registerBenchmark(ObjectiveCNoBridgingStubs)
+#endif
 #endif
 registerBenchmark(ObserverClosure)
 registerBenchmark(ObserverForwarderStruct)

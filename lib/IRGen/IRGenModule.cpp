@@ -47,7 +47,9 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
 
+#include "ConformanceDescription.h"
 #include "GenEnum.h"
+#include "GenIntegerLiteral.h"
 #include "GenType.h"
 #include "IRGenModule.h"
 #include "IRGenDebugInfo.h"
@@ -167,6 +169,21 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
   Int8PtrPtrTy = Int8PtrTy->getPointerTo(0);
   SizeTy = DataLayout.getIntPtrType(getLLVMContext(), /*addrspace*/ 0);
 
+  // For the relative address type, we want to use the int32 bit type
+  // on most architectures, e.g. x86_64, because it produces valid
+  // fixups/relocations. The exception is 16-bit architectures,
+  // so we shorten the relative address type there.
+  if (SizeTy->getBitWidth()<32) {
+    RelativeAddressTy = SizeTy;
+  } else {
+    RelativeAddressTy = Int32Ty;
+  }
+
+  RelativeAddressPtrTy = RelativeAddressTy->getPointerTo();
+
+  FloatTy = llvm::Type::getFloatTy(getLLVMContext());
+  DoubleTy = llvm::Type::getDoubleTy(getLLVMContext());
+
   auto CI = static_cast<ClangImporter*>(&*Context.getClangModuleLoader());
   assert(CI && "no clang module loader");
   auto &clangASTContext = CI->getClangASTContext();
@@ -235,8 +252,7 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
   ProtocolRequirementStructTy =
       createStructType(*this, "swift.protocol_requirement", {
     Int32Ty,                // flags
-    Int32Ty,                // thunk
-    Int32Ty                 // default implementation
+    RelativeAddressTy,      // default implementation
   });
   
   // A tuple type metadata record has a couple extra fields.
@@ -350,8 +366,15 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
 
   MethodDescriptorStructTy
     = createStructType(*this, "swift.method_descriptor", {
+      Int32Ty,
       RelativeAddressTy,
-      Int32Ty
+    });
+
+  MethodOverrideDescriptorStructTy
+    = createStructType(*this, "swift.method_override_descriptor", {
+      RelativeAddressTy,
+      RelativeAddressTy,
+      RelativeAddressTy
     });
 
   TypeMetadataRecordTy
@@ -448,13 +471,29 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
   IsSwiftErrorInRegister =
     clang::CodeGen::swiftcall::isSwiftErrorLoweredInRegister(
       ClangCodeGen->CGM());
+
+  DynamicReplacementsTy =
+      llvm::StructType::get(getLLVMContext(), {Int8PtrPtrTy, Int8PtrTy});
+  DynamicReplacementsPtrTy = DynamicReplacementsTy->getPointerTo(DefaultAS);
+
+  DynamicReplacementLinkEntryTy =
+      llvm::StructType::create(getLLVMContext(), "swift.dyn_repl_link_entry");
+  DynamicReplacementLinkEntryPtrTy =
+      DynamicReplacementLinkEntryTy->getPointerTo(DefaultAS);
+  llvm::Type *linkEntryFields[] = {
+    Int8PtrTy, // function pointer.
+    DynamicReplacementLinkEntryPtrTy // next.
+  };
+  DynamicReplacementLinkEntryTy->setBody(linkEntryFields);
+
+  DynamicReplacementKeyTy = createStructType(*this, "swift.dyn_repl_key",
+                                             {RelativeAddressTy, Int32Ty});
 }
 
 IRGenModule::~IRGenModule() {
   destroyClangTypeConverter();
   destroyMetadataLayoutMap();
   delete &Types;
-  delete DebugInfo;
 }
 
 static bool isReturnAttribute(llvm::Attribute::AttrKind Attr);
@@ -706,8 +745,14 @@ bool IRGenerator::canEmitWitnessTableLazily(SILWitnessTable *wt) {
   if (Opts.UseJIT)
     return false;
 
+  // Regardless of the access level, if the witness table is shared it means
+  // we can safely not emit it. Every other module which needs it will generate
+  // its own shared copy of it.
+  if (wt->getLinkage() == SILLinkage::Shared)
+    return true;
+
   NominalTypeDecl *ConformingTy =
-    wt->getConformance()->getType()->getNominalOrBoundGenericNominal();
+    wt->getConformingType()->getNominalOrBoundGenericNominal();
 
   switch (ConformingTy->getEffectiveAccess()) {
     case AccessLevel::Private:
@@ -724,7 +769,7 @@ bool IRGenerator::canEmitWitnessTableLazily(SILWitnessTable *wt) {
 }
 
 void IRGenerator::addLazyWitnessTable(const ProtocolConformance *Conf) {
-  if (SILWitnessTable *wt = SIL.lookUpWitnessTable(Conf)) {
+  if (auto *wt = SIL.lookUpWitnessTable(Conf, /*deserializeLazily=*/false)) {
     // Add it to the queue if it hasn't already been put there.
     if (canEmitWitnessTableLazily(wt) &&
         LazilyEmittedWitnessTables.insert(wt).second) {
@@ -813,6 +858,10 @@ llvm::AttributeList IRGenModule::constructInitialAttributes() {
   constructInitialFnAttributes(b);
   return llvm::AttributeList::get(LLVMContext,
                                   llvm::AttributeList::FunctionIndex, b);
+}
+
+llvm::Constant *IRGenModule::getInt32(uint32_t value) {
+  return llvm::ConstantInt::get(Int32Ty, value);
 }
 
 llvm::Constant *IRGenModule::getSize(Size size) {
@@ -1057,19 +1106,23 @@ void IRGenModule::cleanupClangCodeGenMetadata() {
   // arbitrary keys to put in the image info.
 
   const char *ObjectiveCGarbageCollection = "Objective-C Garbage Collection";
+  uint8_t Major, Minor;
+  std::tie(Major, Minor) = version::getSwiftNumericVersion();
+  uint32_t Value = (Major << 24) | (Minor << 16) | (swiftVersion << 8);
+
   if (Module.getModuleFlag(ObjectiveCGarbageCollection)) {
     bool FoundOldEntry = replaceModuleFlagsEntry(
         Module.getContext(), Module, ObjectiveCGarbageCollection,
         llvm::Module::Override,
         llvm::ConstantAsMetadata::get(
-            llvm::ConstantInt::get(Int32Ty, (uint32_t)(swiftVersion << 8))));
+            llvm::ConstantInt::get(Int32Ty, Value)));
 
     (void)FoundOldEntry;
     assert(FoundOldEntry && "Could not replace old module flag entry?");
   } else
     Module.addModuleFlag(llvm::Module::Override,
                          ObjectiveCGarbageCollection,
-                         (uint32_t)(swiftVersion << 8));
+                         Value);
 }
 
 bool IRGenModule::finalize() {

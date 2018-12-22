@@ -33,7 +33,9 @@ func useContainer() -> () {
   func exists() -> Bool { return true }
 }
 
-func test(a: BadAttributes) -> () { // expected-note * {{did you mean 'test'?}}
+// expected-note @+2 {{did you mean 'test'?}}
+// expected-note @+1 {{'test' declared here}}
+func test(a: BadAttributes) -> () {
   _ = a.exists() // no-warning
 }
 
@@ -587,7 +589,7 @@ class WrongInheritanceClause6(Int {}
 class WrongInheritanceClause7<T>(Int where T:AnyObject {}
 
 // <rdar://problem/18502220> [swift-crashes 078] parser crash on invalid cast in sequence expr
-Base=1 as Base=1  // expected-error {{cannot assign to immutable expression of type 'Base'}}
+Base=1 as Base=1  // expected-error {{cannot assign to immutable expression of type 'Base.Type'}}
 
 
 
@@ -617,7 +619,7 @@ func foo1(bar!=baz) {} // expected-note {{did you mean 'foo1'?}}
 func foo2(bar! = baz) {}// expected-note {{did you mean 'foo2'?}}
 
 // rdar://19605567
-// expected-error@+1{{use of unresolved identifier 'esp'}}
+// expected-error@+1{{use of unresolved identifier 'esp'; did you mean 'test'?}}
 switch esp {
 case let (jeb):
   // expected-error@+5{{operator with postfix spacing cannot start a subexpression}}

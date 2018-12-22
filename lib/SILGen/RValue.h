@@ -76,7 +76,7 @@ class RValue {
   CanType type;
   unsigned elementsToBeAdded;
   
-  /// \brief Flag value used to mark an rvalue as invalid.
+  /// Flag value used to mark an rvalue as invalid.
   ///
   /// The reasons why this can be true is:
   ///
@@ -172,6 +172,9 @@ public:
   static RValue forInContext() {
     return RValue(InContext);
   }
+
+  static unsigned getRValueSize(CanType substType);
+  static unsigned getRValueSize(AbstractionPattern origType, CanType substType);
   
   /// Create an RValue to which values will be subsequently added using
   /// addElement(), with the level of tuple expansion in the input specified
@@ -320,7 +323,7 @@ public:
           return AnyFunctionType::equalParams(lParams, rParams) &&
                  lf.getResult() == rf.getResult() &&
                  lf->getExtInfo().withNoEscape(false) ==
-                     lf->getExtInfo().withNoEscape(false);
+                     rf->getExtInfo().withNoEscape(false);
         }
       }
       return false;
@@ -351,6 +354,8 @@ public:
 
   /// Borrow all subvalues of the rvalue.
   RValue borrow(SILGenFunction &SGF, SILLocation loc) const &;
+
+  RValue copyForDiagnostics() const;
 
   static bool areObviouslySameValue(SILValue lhs, SILValue rhs);
   bool isObviouslyEqual(const RValue &rhs) const;

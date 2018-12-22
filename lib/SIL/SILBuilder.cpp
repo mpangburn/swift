@@ -144,7 +144,7 @@ BranchInst *SILBuilder::createBranch(SILLocation Loc,
   return createBranch(Loc, TargetBlock, ArgsCopy);
 }
 
-/// \brief Branch to the given block if there's an active insertion point,
+/// Branch to the given block if there's an active insertion point,
 /// then move the insertion point to the end of that block.
 void SILBuilder::emitBlock(SILBasicBlock *BB, SILLocation BranchLoc) {
   if (!hasValidInsertionPoint()) {
@@ -514,7 +514,7 @@ void SILBuilder::emitShallowDestructureValueOperation(
   }
 
   // Otherwise, we want to destructure add the destructure and return.
-  if (getFunction().hasQualifiedOwnership()) {
+  if (getFunction().hasOwnership()) {
     auto *DI = emitDestructureValueOperation(Loc, V);
     copy(DI->getResults(), std::back_inserter(Results));
     return;
@@ -566,4 +566,17 @@ DebugValueAddrInst *SILBuilder::createDebugValueAddr(SILLocation Loc,
   DebugLocOverrideRAII LocOverride{*this, None};
   return insert(DebugValueAddrInst::create(getSILDebugLocation(Loc), src,
                                            getModule(), Var));
+}
+
+void SILBuilder::emitScopedBorrowOperation(SILLocation loc, SILValue original,
+                                           function_ref<void(SILValue)> &&fun) {
+  if (original->getType().isAddress()) {
+    original = createLoadBorrow(loc, original);
+  } else {
+    original = createBeginBorrow(loc, original);
+  }
+
+  fun(original);
+
+  createEndBorrow(loc, original);
 }

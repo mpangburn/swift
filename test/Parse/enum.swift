@@ -110,7 +110,7 @@ enum Recovery2 {
   case UE1: // expected-error {{'case' label can only appear inside a 'switch' statement}}
 }
 enum Recovery3 {
-  case UE2(): // expected-error {{'case' label can only appear inside a 'switch' statement}}
+  case UE2(Void): // expected-error {{'case' label can only appear inside a 'switch' statement}}
 }
 enum Recovery4 { // expected-note {{in declaration of 'Recovery4'}}
   case Self Self // expected-error {{keyword 'Self' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{8-12=`Self`}} expected-error {{consecutive declarations on a line must be separated by ';'}} {{12-12=;}} expected-error {{expected declaration}}
@@ -143,7 +143,7 @@ enum RawTypeNotFirst : RawTypeNotFirstProtocol, Int { // expected-error {{raw ty
   case E
 }
 
-enum ExpressibleByRawTypeNotLiteral : Array<Int> { // expected-error {{raw type 'Array<Int>' is not expressible by any literal}}
+enum ExpressibleByRawTypeNotLiteral : Array<Int> { // expected-error {{raw type 'Array<Int>' is not expressible by a string, integer, or floating-point literal}}
   // expected-error@-1{{'ExpressibleByRawTypeNotLiteral' declares raw type 'Array<Int>', but does not conform to RawRepresentable and conformance could not be synthesized}}
   case Ladd, Elliott, Sixteenth, Harrison
 }
@@ -197,6 +197,7 @@ enum RawTypeWithCharacterValues_Correct : Character {
   case First = "😅" // ok
   case Second = "👩‍👩‍👧‍👦" // ok
   case Third = "👋🏽" // ok
+  case Fourth = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}" // ok
 }
 
 enum RawTypeWithCharacterValues_Error1 : Character { // expected-error {{'RawTypeWithCharacterValues_Error1' declares raw type 'Character', but does not conform to RawRepresentable and conformance could not be synthesized}}
@@ -542,3 +543,9 @@ enum SE0036_Generic<T> {
 }
 
 enum switch {} // expected-error {{keyword 'switch' cannot be used as an identifier here}} expected-note {{if this name is unavoidable, use backticks to escape it}} {{6-12=`switch`}}
+
+enum SE0155 {
+  case emptyArgs() // expected-warning {{enum element with associated values must have at least one associated value}}
+  // expected-note@-1 {{did you mean to remove the empty associated value list?}} {{17-18=}}
+  // expected-note@-2 {{did you mean to explicitly add a 'Void' associated value?}} {{17-17=Void}}
+}

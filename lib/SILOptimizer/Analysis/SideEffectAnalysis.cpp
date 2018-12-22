@@ -321,7 +321,7 @@ FunctionSideEffectFlags *FunctionSideEffects::getEffectsOn(SILValue Addr) {
 // Return true if the given function has defined effects that were successfully
 // recorded in this FunctionSideEffects object.
 bool FunctionSideEffects::setDefinedEffects(SILFunction *F) {
-  if (F->hasSemanticsAttr("arc.programtermination_point")) {
+  if (F->hasSemanticsAttr(SEMANTICS_PROGRAMTERMINATION_POINT)) {
     Traps = true;
     return true;
   }
@@ -353,6 +353,14 @@ bool FunctionSideEffects::setDefinedEffects(SILFunction *F) {
 // FunctionSideEffects object without visiting its body.
 bool FunctionSideEffects::summarizeFunction(SILFunction *F) {
   assert(ParamEffects.empty() && "Expect uninitialized effects.");
+
+  if (F->isDynamicallyReplaceable()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "  -- is dynamically_replaceable " << F->getName() << '\n');
+    setWorstEffects();
+    return true;
+  }
+
   if (!F->empty())
     ParamEffects.resize(F->getArguments().size());
 
